@@ -1,5 +1,7 @@
 Imports System.IO
+Imports System.IO.Compression
 Imports System.Threading
+Imports System.Windows.Forms
 Imports ImageMagick
 Imports Newtonsoft.Json
 
@@ -644,6 +646,106 @@ Public Module ModuloRecursos
         _muPdfVerificado = True
         _rutaMuPdfCache = Nothing
         Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Detector e instalador automático de MuPDF (mutool.exe):
+    ''' Verifica la presencia e integridad del ejecutable. Si no existe, descarga automáticamente
+    ''' el paquete oficial de MuPDF de 64 bits de los servidores oficiales,
+    ''' extrae mutool.exe y lo deja listo en la carpeta tools\ para su uso inmediato.
+    ''' </summary>
+    Public Function AsegurarMuPdfInstalado(Optional ventanaPadre As IWin32Window = Nothing) As Boolean
+        Try
+            Dim rutaActual = ObtenerRutaEjecutableMuPdf(True)
+            If Not String.IsNullOrEmpty(rutaActual) AndAlso File.Exists(rutaActual) Then
+                Dim fi As New FileInfo(rutaActual)
+                If fi.Length > 1024 * 1024 Then
+                    ' mutool.exe está instalado y es válido
+                    Return True
+                End If
+            End If
+
+            ' Si no existe, preparar la descarga automática
+            Dim toolsDir = Path.Combine(ObtenerCarpetaBase(), "tools")
+            If Not Directory.Exists(toolsDir) Then
+                Directory.CreateDirectory(toolsDir)
+            End If
+
+            Dim targetExe = Path.Combine(toolsDir, "mutool.exe")
+            Dim tempZip = Path.Combine(Path.GetTempPath(), "mupdf_install_" & Guid.NewGuid().ToString("N") & ".zip")
+            Dim urlDescarga = "https://github.com/ArtifexSoftware/mupdf-downloads/releases/download/1.26.2/mupdf-1.26.2-windows.zip"
+
+            Try
+                System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12 Or System.Net.SecurityProtocolType.Tls11 Or System.Net.SecurityProtocolType.Tls
+
+                Using client As New System.Net.WebClient()
+                    client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ValidacionPdf/1.0")
+                    client.DownloadFile(urlDescarga, tempZip)
+                End Using
+
+                If File.Exists(tempZip) AndAlso New FileInfo(tempZip).Length > 1000 Then
+                    Using archive = ZipFile.OpenRead(tempZip)
+                        For Each entry In archive.Entries
+                            If entry.Name.Equals("mutool.exe", StringComparison.OrdinalIgnoreCase) Then
+                                entry.ExtractToFile(targetExe, True)
+                                Exit For
+                            End If
+                        Next
+                    End Using
+                End If
+
+                ' Copiar también a las demás carpetas candidatas (bin\Debug\tools, bin\Release\tools, y tools\ del proyecto)
+                Dim posiblesDestinos = {
+                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools", "mutool.exe"),
+                    Path.Combine(ObtenerCarpetaBase(), "tools", "mutool.exe"),
+                    Path.Combine(ObtenerCarpetaBase(), "..", "..", "tools", "mutool.exe")
+                }
+                For Each dest In posiblesDestinos
+                    Try
+                        Dim fullDest = Path.GetFullPath(dest)
+                        Dim dirDest = Path.GetDirectoryName(fullDest)
+                        If Not Directory.Exists(dirDest) Then
+                            Directory.CreateDirectory(dirDest)
+                        End If
+                        If Not File.Exists(fullDest) Then
+                            File.Copy(targetExe, fullDest, True)
+                        End If
+                    Catch
+                    End Try
+                Next
+
+            Catch exDl As Exception
+                Debug.WriteLine("Error al descargar MuPDF automáticamente: " & exDl.Message)
+            Finally
+                Try
+                    If File.Exists(tempZip) Then File.Delete(tempZip)
+                Catch
+                End Try
+            End Try
+
+            _muPdfVerificado = False
+            _rutaMuPdfCache = Nothing
+            Dim rutaFinal = ObtenerRutaEjecutableMuPdf(True)
+            If Not String.IsNullOrEmpty(rutaFinal) AndAlso File.Exists(rutaFinal) Then
+                Return True
+            End If
+
+            ' Si falló la descarga automática (p. ej. sin conexión a internet), advertir al usuario
+            If ventanaPadre IsNot Nothing Then
+                MessageBox.Show(
+                    "El motor de conversión de alta velocidad MuPDF (mutool.exe) no fue encontrado y no se pudo descargar automáticamente." & vbCrLf & vbCrLf &
+                    "Por favor verifique su conexión a Internet o copie manualmente 'mutool.exe' en la carpeta 'tools\' del programa.",
+                    "Herramienta requerida: MuPDF",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning)
+            End If
+
+            Return False
+
+        Catch ex As Exception
+            Debug.WriteLine("Error general en AsegurarMuPdfInstalado: " & ex.Message)
+            Return False
+        End Try
     End Function
 
 End Module

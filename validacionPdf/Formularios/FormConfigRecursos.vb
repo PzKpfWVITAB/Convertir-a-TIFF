@@ -11,15 +11,8 @@ Public Class FormConfigRecursos
         Dim info = ModuloRecursos.ObtenerInfoHardwareCompleta()
 
         lblCpu.Text = $"Procesador: {info.NombreCpu} ({info.NucleosLogicos} núcleos lógicos)"
-        Dim motorStr As String
-        If Not String.IsNullOrEmpty(info.RutaMuPdf) Then
-            motorStr = $"MuPDF Extremo ({Path.GetFileName(info.RutaMuPdf)})"
-        ElseIf Not String.IsNullOrEmpty(info.RutaGhostscript) Then
-            motorStr = $"Ghostscript CLI ({Path.GetFileName(info.RutaGhostscript)})"
-        Else
-            motorStr = "Magick.NET Integrado"
-        End If
-        lblRecomendacion.Text = $"Cálculo Automático (90%): {info.HilosAsignados} Hilos CPU | {info.MemoriaAsignadaGB:0.0} GB RAM máx | Motor: {motorStr}"
+        Dim motorStr As String = If(Not String.IsNullOrEmpty(info.RutaMuPdf), $"MuPDF Extremo ({Path.GetFileName(info.RutaMuPdf)})", "MuPDF no detectado (Requiere instalación)")
+        lblRecomendacion.Text = $"Cálculo Automático (90%): {info.HilosAsignados} Hilos CPU | {info.MemoriaAsignadaGB:0.0} GB RAM máx | Motor Exclusivo: {motorStr}"
 
         nudHilos.Maximum = info.NucleosLogicos
         nudMemoria.Maximum = CDec(Math.Max(1.0, info.TotalRamGB))
