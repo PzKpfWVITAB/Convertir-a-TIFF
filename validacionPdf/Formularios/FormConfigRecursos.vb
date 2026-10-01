@@ -11,7 +11,14 @@ Public Class FormConfigRecursos
         Dim info = ModuloRecursos.ObtenerInfoHardwareCompleta()
 
         lblCpu.Text = $"Procesador: {info.NombreCpu} ({info.NucleosLogicos} núcleos lógicos)"
-        Dim motorStr = If(Not String.IsNullOrEmpty(info.RutaGhostscript), $"Ghostscript CLI ({Path.GetFileName(info.RutaGhostscript)})", "Magick.NET Integrado")
+        Dim motorStr As String
+        If Not String.IsNullOrEmpty(info.RutaMuPdf) Then
+            motorStr = $"MuPDF Extremo ({Path.GetFileName(info.RutaMuPdf)})"
+        ElseIf Not String.IsNullOrEmpty(info.RutaGhostscript) Then
+            motorStr = $"Ghostscript CLI ({Path.GetFileName(info.RutaGhostscript)})"
+        Else
+            motorStr = "Magick.NET Integrado"
+        End If
         lblRecomendacion.Text = $"Cálculo Automático (90%): {info.HilosAsignados} Hilos CPU | {info.MemoriaAsignadaGB:0.0} GB RAM máx | Motor: {motorStr}"
 
         nudHilos.Maximum = info.NucleosLogicos

@@ -18,6 +18,7 @@ Public Module ModuloRecursos
         Public Property RutaStagingLocal As String = "C:\MagickTempCache"
         Public Property UsarBufferLocal As Boolean = True
         Public Property RutaGhostscriptPersonalizada As String = ""
+        Public Property RutaMuPdfPersonalizada As String = ""
     End Class
 
     Public Class InfoHardware
@@ -31,6 +32,7 @@ Public Module ModuloRecursos
         Public Property ModoAutomatico As Boolean = True
         Public Property RutaStaging As String = ""
         Public Property RutaGhostscript As String = ""
+        Public Property RutaMuPdf As String = ""
 
         Public ReadOnly Property TotalRamGB As Double
             Get
@@ -183,6 +185,9 @@ Public Module ModuloRecursos
 
             ' Detección automática del motor de ultra-alto rendimiento Ghostscript CLI
             info.RutaGhostscript = ObtenerRutaEjecutableGhostscript()
+
+            ' Detección automática del motor de velocidad extrema MuPDF CLI (mutool.exe)
+            info.RutaMuPdf = ObtenerRutaEjecutableMuPdf()
 
         Catch ex As Exception
             Debug.WriteLine("Error en ObtenerInfoHardwareCompleta: " & ex.Message)
@@ -475,6 +480,126 @@ Public Module ModuloRecursos
 
         _ghostscriptVerificado = True
         _rutaGhostscriptCache = Nothing
+        Return Nothing
+    End Function
+
+    Private _rutaMuPdfCache As String = Nothing
+    Private _muPdfVerificado As Boolean = False
+
+    ''' <summary>
+    ''' Localiza el ejecutable de consola de MuPDF (mutool.exe)
+    ''' en el sistema: configuración personalizada, subcarpeta tools\ del programa,
+    ''' variables de entorno, Program Files o PATH.
+    ''' </summary>
+    Public Function ObtenerRutaEjecutableMuPdf(Optional forzarReevaluacion As Boolean = False) As String
+        If Not forzarReevaluacion AndAlso _muPdfVerificado Then
+            Return _rutaMuPdfCache
+        End If
+
+        ' 1. Configuración explícita en config_recursos.json
+        Dim cfg = ObtenerConfiguracion()
+        If Not String.IsNullOrWhiteSpace(cfg.RutaMuPdfPersonalizada) Then
+            Dim rCustom = cfg.RutaMuPdfPersonalizada.Trim()
+            If File.Exists(rCustom) Then
+                _rutaMuPdfCache = rCustom
+                _muPdfVerificado = True
+                Return _rutaMuPdfCache
+            ElseIf Directory.Exists(rCustom) Then
+                Dim cMu = Path.Combine(rCustom, "mutool.exe")
+                If File.Exists(cMu) Then
+                    _rutaMuPdfCache = cMu
+                    _muPdfVerificado = True
+                    Return _rutaMuPdfCache
+                End If
+            End If
+        End If
+
+        ' 2. Carpeta local del programa (portabilidad directa sin instalación)
+        Dim baseDir = ObtenerCarpetaBase()
+        Dim localPaths = {
+            Path.Combine(baseDir, "tools", "mutool.exe"),
+            Path.Combine(baseDir, "bin", "mutool.exe"),
+            Path.Combine(baseDir, "mutool.exe"),
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tools", "mutool.exe"),
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mutool.exe")
+        }
+        For Each lp In localPaths
+            If File.Exists(lp) Then
+                _rutaMuPdfCache = Path.GetFullPath(lp)
+                _muPdfVerificado = True
+                Return _rutaMuPdfCache
+            End If
+        Next
+
+        ' 3. Variables de entorno MUPDF_PATH, MUTOOL_PATH
+        Dim envNames = {"MUPDF_PATH", "MUTOOL_PATH"}
+        For Each envName In envNames
+            Dim envVal = Environment.GetEnvironmentVariable(envName)
+            If Not String.IsNullOrWhiteSpace(envVal) Then
+                Dim val = envVal.Trim()
+                If File.Exists(val) Then
+                    _rutaMuPdfCache = val
+                    _muPdfVerificado = True
+                    Return _rutaMuPdfCache
+                ElseIf Directory.Exists(val) Then
+                    Dim cMu = Path.Combine(val, "mutool.exe")
+                    If File.Exists(cMu) Then
+                        _rutaMuPdfCache = cMu
+                        _muPdfVerificado = True
+                        Return _rutaMuPdfCache
+                    End If
+                End If
+            End If
+        Next
+
+        ' 4. Carpetas estándar en Program Files
+        Dim standardRoots = {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "C:\Program Files\mupdf",
+            "C:\tools\mupdf",
+            "C:\mupdf"
+        }
+        For Each root In standardRoots
+            Try
+                If String.IsNullOrEmpty(root) OrElse Not Directory.Exists(root) Then Continue For
+                Dim directExe = Path.Combine(root, "mutool.exe")
+                If File.Exists(directExe) Then
+                    _rutaMuPdfCache = directExe
+                    _muPdfVerificado = True
+                    Return _rutaMuPdfCache
+                End If
+                Dim subExe = Path.Combine(root, "mupdf", "mutool.exe")
+                If File.Exists(subExe) Then
+                    _rutaMuPdfCache = subExe
+                    _muPdfVerificado = True
+                    Return _rutaMuPdfCache
+                End If
+            Catch
+            End Try
+        Next
+
+        ' 5. PATH de Windows
+        Try
+            Dim pathEnv = Environment.GetEnvironmentVariable("PATH")
+            If Not String.IsNullOrEmpty(pathEnv) Then
+                For Each p In pathEnv.Split(";"c)
+                    Dim trimmed = p.Trim()
+                    If Not String.IsNullOrEmpty(trimmed) AndAlso Directory.Exists(trimmed) Then
+                        Dim testMu = Path.Combine(trimmed, "mutool.exe")
+                        If File.Exists(testMu) Then
+                            _rutaMuPdfCache = testMu
+                            _muPdfVerificado = True
+                            Return _rutaMuPdfCache
+                        End If
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        _muPdfVerificado = True
+        _rutaMuPdfCache = Nothing
         Return Nothing
     End Function
 
