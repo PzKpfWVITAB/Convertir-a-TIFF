@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36616.10 d17.14
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{F184B08F-C81C-45F6-A57F-5ABD9991F28F}") = "validacionPdf", "validacionPdf\validacionPdf.vbproj", "{8CDBD1EF-B721-4CDB-A1A8-630BB4408488}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8CDBD1EF-B721-4CDB-A1A8-630BB4408488}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8CDBD1EF-B721-4CDB-A1A8-630BB4408488}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8CDBD1EF-B721-4CDB-A1A8-630BB4408488}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8CDBD1EF-B721-4CDB-A1A8-630BB4408488}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {122A5BBC-D7B6-4FD2-95F6-8EBABED25E68}
+	EndGlobalSection
+EndGlobal
