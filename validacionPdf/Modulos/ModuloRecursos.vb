@@ -17,6 +17,7 @@ Public Module ModuloRecursos
         Public Property HilosRedConcurrente As Integer = 8
         Public Property RutaStagingLocal As String = "C:\MagickTempCache"
         Public Property UsarBufferLocal As Boolean = True
+        Public Property RutaGhostscriptPersonalizada As String = ""
     End Class
 
     Public Class InfoHardware
@@ -29,6 +30,7 @@ Public Module ModuloRecursos
         Public Property MargenSeguridadPct As Integer = 10
         Public Property ModoAutomatico As Boolean = True
         Public Property RutaStaging As String = ""
+        Public Property RutaGhostscript As String = ""
 
         Public ReadOnly Property TotalRamGB As Double
             Get
@@ -179,6 +181,9 @@ Public Module ModuloRecursos
                 info.MemoriaAsignadaBytes = Math.Min(info.MemoriaAsignadaBytes, 1536UL * 1024UL * 1024UL)
             End If
 
+            ' Detección automática del motor de ultra-alto rendimiento Ghostscript CLI
+            info.RutaGhostscript = ObtenerRutaEjecutableGhostscript()
+
         Catch ex As Exception
             Debug.WriteLine("Error en ObtenerInfoHardwareCompleta: " & ex.Message)
         End Try
@@ -282,6 +287,195 @@ Public Module ModuloRecursos
             Thread.Sleep(500)
         End While
         Return True
+    End Function
+
+    Private _rutaGhostscriptCache As String = Nothing
+    Private _ghostscriptVerificado As Boolean = False
+
+    ''' <summary>
+    ''' Localiza el ejecutable de consola de Ghostscript (gswin64c.exe o gswin32c.exe)
+    ''' en el sistema: configuración personalizada, variables de entorno, Program Files, Registro de Windows o PATH.
+    ''' </summary>
+    Public Function ObtenerRutaEjecutableGhostscript(Optional forzarReevaluacion As Boolean = False) As String
+        If Not forzarReevaluacion AndAlso _ghostscriptVerificado Then
+            Return _rutaGhostscriptCache
+        End If
+
+        ' 1. Configuración explícita en config_recursos.json
+        Dim cfg = ObtenerConfiguracion()
+        If Not String.IsNullOrWhiteSpace(cfg.RutaGhostscriptPersonalizada) Then
+            Dim rCustom = cfg.RutaGhostscriptPersonalizada.Trim()
+            If File.Exists(rCustom) Then
+                _rutaGhostscriptCache = rCustom
+                _ghostscriptVerificado = True
+                Return _rutaGhostscriptCache
+            ElseIf Directory.Exists(rCustom) Then
+                Dim c64 = Path.Combine(rCustom, "gswin64c.exe")
+                If File.Exists(c64) Then
+                    _rutaGhostscriptCache = c64
+                    _ghostscriptVerificado = True
+                    Return _rutaGhostscriptCache
+                End If
+                Dim c32 = Path.Combine(rCustom, "gswin32c.exe")
+                If File.Exists(c32) Then
+                    _rutaGhostscriptCache = c32
+                    _ghostscriptVerificado = True
+                    Return _rutaGhostscriptCache
+                End If
+            End If
+        End If
+
+        ' 2. Variables de entorno GS_BIN, GHOSTSCRIPT_PATH, GS_PATH
+        Dim envNames = {"GS_BIN", "GHOSTSCRIPT_PATH", "GS_PATH"}
+        For Each envName In envNames
+            Dim envVal = Environment.GetEnvironmentVariable(envName)
+            If Not String.IsNullOrWhiteSpace(envVal) Then
+                Dim val = envVal.Trim()
+                If File.Exists(val) Then
+                    _rutaGhostscriptCache = val
+                    _ghostscriptVerificado = True
+                    Return _rutaGhostscriptCache
+                ElseIf Directory.Exists(val) Then
+                    Dim c64 = Path.Combine(val, "gswin64c.exe")
+                    If File.Exists(c64) Then
+                        _rutaGhostscriptCache = c64
+                        _ghostscriptVerificado = True
+                        Return _rutaGhostscriptCache
+                    End If
+                    Dim c64bin = Path.Combine(val, "bin", "gswin64c.exe")
+                    If File.Exists(c64bin) Then
+                        _rutaGhostscriptCache = c64bin
+                        _ghostscriptVerificado = True
+                        Return _rutaGhostscriptCache
+                    End If
+                    Dim c32 = Path.Combine(val, "gswin32c.exe")
+                    If File.Exists(c32) Then
+                        _rutaGhostscriptCache = c32
+                        _ghostscriptVerificado = True
+                        Return _rutaGhostscriptCache
+                    End If
+                End If
+            End If
+        Next
+
+        ' 3. Carpetas estándar en Program Files (64 y 32 bits)
+        Dim standardRoots = {
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            "C:\Program Files",
+            "C:\Program Files (x86)",
+            "D:\Program Files",
+            "D:\gs",
+            "C:\gs"
+        }
+
+        For Each root In standardRoots
+            Try
+                If String.IsNullOrEmpty(root) OrElse Not Directory.Exists(root) Then Continue For
+                Dim gsDir = If(root.EndsWith("gs", StringComparison.OrdinalIgnoreCase), root, Path.Combine(root, "gs"))
+                If Directory.Exists(gsDir) Then
+                    ' Buscar subdirectorios gs* ordenados de mayor versión a menor
+                    Dim subdirs = Directory.GetDirectories(gsDir).OrderByDescending(Function(d) d).ToList()
+                    For Each subd In subdirs
+                        Dim exe64 = Path.Combine(subd, "bin", "gswin64c.exe")
+                        If File.Exists(exe64) Then
+                            _rutaGhostscriptCache = exe64
+                            _ghostscriptVerificado = True
+                            Return _rutaGhostscriptCache
+                        End If
+                        Dim exe32 = Path.Combine(subd, "bin", "gswin32c.exe")
+                        If File.Exists(exe32) Then
+                            _rutaGhostscriptCache = exe32
+                            _ghostscriptVerificado = True
+                            Return _rutaGhostscriptCache
+                        End If
+                    Next
+                End If
+            Catch
+            End Try
+        Next
+
+        ' 4. Registro de Windows (HKLM y HKCU)
+        Dim regBases = {
+            Microsoft.Win32.Registry.LocalMachine,
+            Microsoft.Win32.Registry.CurrentUser
+        }
+        Dim regSubPaths = {
+            "SOFTWARE\GPL Ghostscript",
+            "SOFTWARE\Artifex\Ghostscript",
+            "SOFTWARE\Ghostscript"
+        }
+
+        For Each regBase In regBases
+            For Each subPath In regSubPaths
+                Try
+                    Using key = regBase.OpenSubKey(subPath)
+                        If key IsNot Nothing Then
+                            Dim versions = key.GetSubKeyNames().OrderByDescending(Function(v) v).ToList()
+                            For Each ver In versions
+                                Using verKey = key.OpenSubKey(ver)
+                                    If verKey IsNot Nothing Then
+                                        Dim gsDll = verKey.GetValue("GS_DLL")
+                                        Dim gsDllStr = If(gsDll IsNot Nothing, gsDll.ToString(), "")
+                                        If Not String.IsNullOrEmpty(gsDllStr) AndAlso File.Exists(gsDllStr) Then
+                                            Dim binDir = Path.GetDirectoryName(gsDllStr)
+                                            Dim exe64 = Path.Combine(binDir, "gswin64c.exe")
+                                            If File.Exists(exe64) Then
+                                                _rutaGhostscriptCache = exe64
+                                                _ghostscriptVerificado = True
+                                                Return _rutaGhostscriptCache
+                                            End If
+                                            Dim exe32 = Path.Combine(binDir, "gswin32c.exe")
+                                            If File.Exists(exe32) Then
+                                                _rutaGhostscriptCache = exe32
+                                                _ghostscriptVerificado = True
+                                                Return _rutaGhostscriptCache
+                                            End If
+                                        End If
+                                    End If
+                                End Using
+                            Next
+                        End If
+                    End Using
+                Catch
+                End Try
+            Next
+        Next
+
+        ' 5. PATH de Windows
+        Try
+            Dim pathEnv = Environment.GetEnvironmentVariable("PATH")
+            If Not String.IsNullOrEmpty(pathEnv) Then
+                For Each p In pathEnv.Split(";"c)
+                    Dim trimmed = p.Trim()
+                    If Not String.IsNullOrEmpty(trimmed) AndAlso Directory.Exists(trimmed) Then
+                        Dim test64 = Path.Combine(trimmed, "gswin64c.exe")
+                        If File.Exists(test64) Then
+                            _rutaGhostscriptCache = test64
+                            _ghostscriptVerificado = True
+                            Return _rutaGhostscriptCache
+                        End If
+                        Dim test32 = Path.Combine(trimmed, "gswin32c.exe")
+                        If File.Exists(test32) Then
+                            _rutaGhostscriptCache = test32
+                            _ghostscriptVerificado = True
+                            Return _rutaGhostscriptCache
+                        End If
+                        Dim testGs = Path.Combine(trimmed, "gs.exe")
+                        If File.Exists(testGs) Then
+                            _rutaGhostscriptCache = testGs
+                            _ghostscriptVerificado = True
+                            Return _rutaGhostscriptCache
+                        End If
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        _ghostscriptVerificado = True
+        _rutaGhostscriptCache = Nothing
+        Return Nothing
     End Function
 
 End Module

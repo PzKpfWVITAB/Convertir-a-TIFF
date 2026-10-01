@@ -281,6 +281,10 @@ Public Class FormTransferir
         Dim maxHilos As Integer = ModuloRecursos.ObtenerHilosOptimos()
         Dim cancelToken As CancellationToken = If(cancelSourceTransfer IsNot Nothing, cancelSourceTransfer.Token, CancellationToken.None)
 
+        Dim rutaGs = ModuloRecursos.ObtenerRutaEjecutableGhostscript()
+        Dim motorDetectado = If(Not String.IsNullOrEmpty(rutaGs), $"Ghostscript CLI Nativo ({Path.GetFileName(rutaGs)})", "Magick.NET Integrado")
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INICIO | Motor de conversión: {motorDetectado} | Hilos paralelos dinámicos: {maxHilos}")
+
         ' =========================================================================
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
         ' =========================================================================
@@ -483,8 +487,26 @@ Public Class FormTransferir
                 anioEncontrado = matchAnio.Value
             End If
 
-            ' Conversión de alto rendimiento con validación de cancelación paso a paso
-            ConvertirPdfTiffOptimizado(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
+            ' Conversión de ultra-alto rendimiento con validación de cancelación paso a paso
+            Dim motorUsado As String = "Ghostscript CLI"
+            Dim rutaGs = ModuloRecursos.ObtenerRutaEjecutableGhostscript()
+
+            If Not String.IsNullOrEmpty(rutaGs) Then
+                Try
+                    ConvertirPdfTiffGhostscriptDirecto(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
+                Catch exCancel As OperationCanceledException
+                    Throw
+                Catch exGs As Exception
+                    ' Fallback transparente a Magick.NET si Ghostscript CLI arroja algún error
+                    EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | AVISO MOTOR | Fallback a Magick.NET para {nombreSinExt}: {exGs.Message}")
+                    motorUsado = "Magick.NET"
+                    ConvertirPdfTiffOptimizado(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
+                End Try
+            Else
+                motorUsado = "Magick.NET"
+                ConvertirPdfTiffOptimizado(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
+            End If
+
             totalPaginas = paginas
 
             ' Verificar que no se haya cancelado durante la escritura
@@ -526,7 +548,7 @@ Public Class FormTransferir
                 )
 
                 Dim modoHilosStr = If(procesarPaginasEnParalelo, $" [{hilosParalelos} hilos]", "")
-                EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {estatusFinal} | {nombreSinExt} | {pesoMB:0.1} MB ({paginas} páginas){modoHilosStr}")
+                EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {estatusFinal} | {nombreSinExt} | {pesoMB:0.1} MB ({paginas} páginas) [{motorUsado}]{modoHilosStr}")
             End If
 
         Catch ex As OperationCanceledException
@@ -550,6 +572,178 @@ Public Class FormTransferir
 
         Return estatusFinal
     End Function
+
+    ''' <summary>
+    ''' Motor nativo de ultra-alto rendimiento: Ejecuta directamente Ghostscript (gswin64c.exe)
+    ''' sin intermediación de Magick.NET, renderizando directamente a TIFF Grayscale LZW a 250 DPI en una única pasada streaming.
+    ''' Elimina la doble conversión a PNG intermedia, el bloqueo de memoria de la DLL y reduce a cero el consumo superfluo de disco.
+    ''' </summary>
+    Private Sub ConvertirPdfTiffGhostscriptDirecto(
+        pdfPath As String,
+        carpetaDestino As String,
+        nombreBase As String,
+        ByRef totalPaginas As Integer,
+        token As CancellationToken,
+        Optional procesarPaginasEnParalelo As Boolean = False,
+        Optional hilosParalelos As Integer = 1
+    )
+        If token.IsCancellationRequested Then Throw New OperationCanceledException()
+
+        Dim gsExe = ModuloRecursos.ObtenerRutaEjecutableGhostscript()
+        If String.IsNullOrEmpty(gsExe) OrElse Not File.Exists(gsExe) Then
+            Throw New FileNotFoundException("No se encontró el ejecutable de Ghostscript CLI en el sistema.")
+        End If
+
+        If Not File.Exists(pdfPath) Then
+            Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
+        End If
+
+        ' Guardián de almacenamiento: Esperar disponibilidad de espacio si el disco local está en niveles críticos (< 10 GB)
+        ModuloRecursos.EsperarEspacioDisponible(10.0, token, 30000)
+
+        Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
+        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "gs_" & Guid.NewGuid().ToString("N"))
+        Directory.CreateDirectory(stagingCarpeta)
+
+        Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
+        Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
+
+        Try
+            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+
+            ' El especificador %d en Ghostscript genera _1.tiff, _2.tiff, ... (coincidencia exacta 1-based)
+            Dim patronSalida = Path.Combine(stagingCarpeta, $"{nombreBase}_%d.tiff")
+
+            Dim args As New StringBuilder()
+            args.Append("-q ")
+            args.Append("-dQUIET ")
+            args.Append("-dNOPAUSE ")
+            args.Append("-dBATCH ")
+            args.Append("-dSAFER ")
+            args.Append("-sDEVICE=tiffgray ")
+            args.Append("-sCompression=lzw ")
+            args.Append("-r250x250 ")
+
+            If procesarPaginasEnParalelo AndAlso hilosParalelos > 1 Then
+                ' En PDFs individuales de gran escala, activar múltiples hilos internos de renderizado y buffer de memoria generoso
+                Dim numHilosGs = Math.Max(2, Math.Min(hilosParalelos, 32))
+                args.Append($"-dNumRenderingThreads={numHilosGs} ")
+                args.Append("-dBufferSpace=2000000000 ")
+            Else
+                args.Append("-dNumRenderingThreads=1 ")
+            End If
+
+            args.Append($"-sOutputFile=""{patronSalida}"" ")
+            args.Append($"""{pdfPath}""")
+
+            Dim psi As New ProcessStartInfo With {
+                .FileName = gsExe,
+                .Arguments = args.ToString(),
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .RedirectStandardError = True,
+                .RedirectStandardOutput = False
+            }
+
+            Using proc As New Process()
+                proc.StartInfo = psi
+                Dim stderrOutput As New StringBuilder()
+
+                AddHandler proc.ErrorDataReceived, Sub(s, e)
+                    If Not String.IsNullOrEmpty(e.Data) Then
+                        stderrOutput.AppendLine(e.Data)
+                    End If
+                End Sub
+
+                proc.Start()
+                proc.BeginErrorReadLine()
+
+                ' Soporte de cancelación inmediata: terminar el subproceso del SO
+                Using reg = token.Register(Sub()
+                    Try
+                        If Not proc.HasExited Then proc.Kill()
+                    Catch
+                    End Try
+                End Sub)
+
+                    Dim ultimasPaginasLeidas As Integer = 0
+                    While Not proc.WaitForExit(1000)
+                        If token.IsCancellationRequested Then
+                            Try
+                                If Not proc.HasExited Then proc.Kill()
+                            Catch
+                            End Try
+                            Throw New OperationCanceledException()
+                        End If
+
+                        ' Monitoreo en tiempo real de páginas generadas para la UI
+                        Try
+                            Dim tiffsEnStaging = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.tiff").Length
+                            If tiffsEnStaging > ultimasPaginasLeidas Then
+                                ultimasPaginasLeidas = tiffsEnStaging
+                                If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                                    Dim pct = If(paginasEsperadas > 0, CInt(Math.Min(100, (ultimasPaginasLeidas / CDbl(paginasEsperadas)) * 100)), 50)
+                                    Dim totalStr = If(paginasEsperadas > 0, paginasEsperadas.ToString("#,##0"), "?")
+                                    bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {ultimasPaginasLeidas:#,##0}/{totalStr} págs [Ghostscript CLI]")
+                                End If
+                            End If
+                        Catch
+                        End Try
+                    End While
+
+                End Using
+
+                If token.IsCancellationRequested Then
+                    Throw New OperationCanceledException()
+                End If
+
+                If proc.ExitCode <> 0 Then
+                    Dim errStr = stderrOutput.ToString().Trim()
+                    Throw New IOException($"Ghostscript finalizó con código de error {proc.ExitCode}: {errStr}")
+                End If
+            End Using
+
+            ' Validar archivos generados en staging
+            Dim tiffGenerados = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.tiff")
+            If tiffGenerados.Length = 0 Then
+                Throw New IOException("Ghostscript terminó la ejecución pero no generó archivos TIFF en staging.")
+            End If
+
+            totalPaginas = tiffGenerados.Length
+
+            ' Asegurar carpeta destino
+            SyncLock locker
+                If Not Directory.Exists(carpetaDestino) Then
+                    Directory.CreateDirectory(carpetaDestino)
+                End If
+            End SyncLock
+
+            ' Transferencia directa de TIFFs listos hacia destino final
+            For Each tiffFile In tiffGenerados
+                If token.IsCancellationRequested Then
+                    LimpiarCarpetaIncompleta(carpetaDestino)
+                    Throw New OperationCanceledException()
+                End If
+                Dim destinoFinal = Path.Combine(carpetaDestino, Path.GetFileName(tiffFile))
+                File.Copy(tiffFile, destinoFinal, True)
+            Next
+
+        Catch ex As OperationCanceledException
+            LimpiarCarpetaIncompleta(carpetaDestino)
+            Throw
+        Catch ex As Exception
+            LimpiarCarpetaIncompleta(carpetaDestino)
+            Throw
+        Finally
+            ' Limpieza de carpeta temporal de staging
+            Try
+                If Directory.Exists(stagingCarpeta) Then
+                    Directory.Delete(stagingCarpeta, True)
+                End If
+            Catch
+            End Try
+        End Try
+    End Sub
 
     ''' <summary>
     ''' Conversión atómica a TIFF con control de cancelación y guardián de espacio en disco:

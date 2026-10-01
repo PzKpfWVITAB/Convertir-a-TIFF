@@ -11,8 +11,8 @@ Public Class FormConfigRecursos
         Dim info = ModuloRecursos.ObtenerInfoHardwareCompleta()
 
         lblCpu.Text = $"Procesador: {info.NombreCpu} ({info.NucleosLogicos} núcleos lógicos)"
-        lblRam.Text = $"Memoria RAM: {info.TotalRamGB:0.0} GB Total ({info.RamDisponibleGB:0.0} GB Libre)"
-        lblRecomendacion.Text = $"Cálculo Automático (90%): {info.HilosAsignados} Hilos CPU asignados | {info.MemoriaAsignadaGB:0.0} GB RAM máx (10% libre reservado para el SO)"
+        Dim motorStr = If(Not String.IsNullOrEmpty(info.RutaGhostscript), $"Ghostscript CLI ({Path.GetFileName(info.RutaGhostscript)})", "Magick.NET Integrado")
+        lblRecomendacion.Text = $"Cálculo Automático (90%): {info.HilosAsignados} Hilos CPU | {info.MemoriaAsignadaGB:0.0} GB RAM máx | Motor: {motorStr}"
 
         nudHilos.Maximum = info.NucleosLogicos
         nudMemoria.Maximum = CDec(Math.Max(1.0, info.TotalRamGB))
