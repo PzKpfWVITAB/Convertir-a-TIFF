@@ -46,6 +46,39 @@ Public Class FormTransferir
     Private cancelSourceTransfer As CancellationTokenSource = Nothing
     Private canceladoPorUsuario As Boolean = False
     Private ReadOnly ArchivosEnProceso As New ConcurrentDictionary(Of String, String)()
+    Private Shared ReadOnly ProcesosActivos As New ConcurrentDictionary(Of Integer, Process)()
+
+    ''' <summary>
+    ''' Mata de forma inmediata y fulminante todos los subprocesos de conversión en segundo plano
+    ''' (Ghostscript, MuPDF), liberando instantáneamente la CPU, RAM y los bloqueos de archivos en disco.
+    ''' </summary>
+    Public Shared Sub MatarTodosLosProcesosDeConversion()
+        ' 1. Matar procesos registrados en nuestra lista
+        For Each kvp In ProcesosActivos
+            Try
+                Dim p = kvp.Value
+                If Not p.HasExited Then
+                    p.Kill()
+                End If
+            Catch
+            End Try
+        Next
+        ProcesosActivos.Clear()
+
+        ' 2. Barrido complementario de procesos por nombre en Windows
+        Dim nombresProcesos = {"gswin64c", "gswin32c", "gs", "mutool"}
+        For Each nom In nombresProcesos
+            Try
+                For Each p In Process.GetProcessesByName(nom)
+                    Try
+                        p.Kill()
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        Next
+    End Sub
 
     Public Class TransferData
         Public Property Origen As String
@@ -57,6 +90,7 @@ Public Class FormTransferir
 
         ' Aplicar configuración dinámica de límites de hardware y búfer de staging
         ModuloRecursos.AplicarLimitesMagickNET()
+        ModuloRecursos.LimpiarCacheHuerfana()
 
         If Not client.DefaultRequestHeaders.Contains("X-API-KEY") Then
             client.DefaultRequestHeaders.Add("X-API-KEY", "MI_TOKEN_SECRETO")
@@ -232,13 +266,32 @@ Public Class FormTransferir
 
     Private Sub CancelarProcesoYLimpiar()
         canceladoPorUsuario = True
-        If cancelSourceTransfer IsNot Nothing AndAlso Not cancelSourceTransfer.IsCancellationRequested Then
-            cancelSourceTransfer.Cancel()
-        End If
-        If bgWorker IsNot Nothing AndAlso bgWorker.IsBusy Then
-            bgWorker.CancelAsync()
-        End If
-        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | CANCELACIÓN SOLICITADA POR EL USUARIO")
+        Try
+            If cancelSourceTransfer IsNot Nothing AndAlso Not cancelSourceTransfer.IsCancellationRequested Then
+                cancelSourceTransfer.Cancel()
+            End If
+        Catch
+        End Try
+
+        Try
+            If bgWorker IsNot Nothing AndAlso bgWorker.IsBusy Then
+                bgWorker.CancelAsync()
+            End If
+        Catch
+        End Try
+
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | CANCELACIÓN INMEDIATA SOLICITADA POR EL USUARIO")
+
+        ' 1. Matar fulminantemente todos los subprocesos en segundo plano (gswin64c, mutool, gs)
+        MatarTodosLosProcesosDeConversion()
+
+        ' 2. Limpieza inmediata de todas las carpetas destino incompletas en vuelo
+        LimpiarTodosLosIncompletosEnVuelo()
+
+        ' 3. Limpieza inmediata de cachés y carpetas temporales
+        ModuloRecursos.LimpiarCacheHuerfana()
+
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | CANCELACIÓN COMPLETADA | Subprocesos cerrados y temporales eliminados.")
     End Sub
 
     Private Sub bgWorker_DoWork(sender As Object, e As DoWorkEventArgs) Handles bgWorker.DoWork
@@ -292,6 +345,9 @@ Public Class FormTransferir
             motorDetectado = "Magick.NET Integrado"
         End If
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INICIO | Motor de conversión: {motorDetectado} | Hilos paralelos dinámicos: {maxHilos}")
+
+        ' Limpieza proactiva de cualquier residuo o caché huérfana antes de iniciar
+        ModuloRecursos.LimpiarCacheHuerfana()
 
         ' =========================================================================
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
@@ -454,6 +510,7 @@ Public Class FormTransferir
 
         ' Esperar brevemente que la cola de bitácora termine de insertar solo lo completado
         ModuloBitacoraAsync.EsperarVaciado(2500)
+        ModuloRecursos.LimpiarCacheHuerfana()
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | FIN PROCESO | Origen: {origen} | Cancelado: {canceladoPorUsuario}")
     End Sub
 
@@ -478,6 +535,10 @@ Public Class FormTransferir
         Dim carpetaPdfDestino As String = ""
         Dim archivoCompletadoConExito As Boolean = False
         Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
+
+        If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+            Return "CANCELADO"
+        End If
 
         Try
             Dim rutaRelativaArchivo As String = ObtenerRutaRelativa(origen, archivo)
@@ -586,8 +647,12 @@ Public Class FormTransferir
             LimpiarCarpetaIncompleta(carpetaPdfDestino)
             estatusFinal = "CANCELADO"
         Catch ex As Exception
-            estatusFinal = "ERROR"
             LimpiarCarpetaIncompleta(carpetaPdfDestino)
+            If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                estatusFinal = "CANCELADO"
+                Return "CANCELADO"
+            End If
+            estatusFinal = "ERROR"
             Dim detalleError As String = ex.Message
             If TypeOf ex Is AggregateException Then
                 Dim agg = DirectCast(ex, AggregateException).Flatten()
@@ -635,7 +700,7 @@ Public Class FormTransferir
         Optional procesarPaginasEnParalelo As Boolean = False,
         Optional hilosParalelos As Integer = 1
     )
-        If token.IsCancellationRequested Then Throw New OperationCanceledException()
+        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
         Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
         If String.IsNullOrEmpty(muExe) OrElse Not File.Exists(muExe) Then
@@ -646,7 +711,12 @@ Public Class FormTransferir
             Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
         End If
 
-        ModuloRecursos.EsperarEspacioDisponible(10.0, token, 30000)
+        ' Asegurar carpeta destino físicamente en almacenamiento
+        SyncLock locker
+            If Not Directory.Exists(carpetaDestino) Then
+                Directory.CreateDirectory(carpetaDestino)
+            End If
+        End SyncLock
 
         Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
         Dim stagingCarpeta = Path.Combine(rutaStagingBase, "mu_" & Guid.NewGuid().ToString("N"))
@@ -654,9 +724,10 @@ Public Class FormTransferir
 
         Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
         Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
+        Dim procId As Integer = 0
 
         Try
-            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
             ' Patrón de imagen temporal de mutool draw: p_1.png, p_2.png...
             Dim patronSalidaPng = Path.Combine(stagingCarpeta, "p_%d.png")
@@ -682,6 +753,8 @@ Public Class FormTransferir
             Dim lockerPaginas As New Object()
 
             Dim codificarPngATiff = Sub(pngFile As String)
+                If token.IsCancellationRequested OrElse canceladoPorUsuario Then Exit Sub
+
                 Dim nomSinExt = Path.GetFileNameWithoutExtension(pngFile)
                 Dim partes = nomSinExt.Split("_"c)
                 If partes.Length >= 2 Then
@@ -692,7 +765,7 @@ Public Class FormTransferir
                             paginasEncontradas.Add(numPag)
                         End SyncLock
 
-                        Dim tiffDestino = Path.Combine(stagingCarpeta, $"{nombreBase}_{numPag}.tiff")
+                        Dim tiffDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.tiff")
 
                         Using img As New MagickImage(pngFile)
                             img.Format = MagickFormat.Tiff
@@ -730,6 +803,8 @@ Public Class FormTransferir
                 End Sub
 
                 proc.Start()
+                procId = proc.Id
+                ProcesosActivos.TryAdd(procId, proc)
                 proc.BeginErrorReadLine()
 
                 ' Soporte de cancelación inmediata
@@ -741,8 +816,8 @@ Public Class FormTransferir
                 End Sub)
 
                     ' Bucle de consumo concurrente en tiempo real mientras mutool renderiza
-                    While Not proc.WaitForExit(300)
-                        If token.IsCancellationRequested Then
+                    While Not proc.WaitForExit(200)
+                        If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                             Try
                                 If Not proc.HasExited Then proc.Kill()
                             Catch
@@ -767,7 +842,7 @@ Public Class FormTransferir
 
                 End Using
 
-                If token.IsCancellationRequested Then
+                If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                     Throw New OperationCanceledException()
                 End If
 
@@ -785,30 +860,13 @@ Public Class FormTransferir
                 Parallel.ForEach(ultimosPng, popt, codificarPngATiff)
             End If
 
-            ' Validar archivos TIFF finales en staging
-            Dim tiffGenerados = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.tiff")
+            ' Validar archivos TIFF finales directamente en la carpeta destino
+            Dim tiffGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.tiff")
             If tiffGenerados.Length = 0 Then
-                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos TIFF válidos.")
+                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos TIFF válidos en destino.")
             End If
 
             totalPaginas = tiffGenerados.Length
-
-            ' Asegurar carpeta destino
-            SyncLock locker
-                If Not Directory.Exists(carpetaDestino) Then
-                    Directory.CreateDirectory(carpetaDestino)
-                End If
-            End SyncLock
-
-            ' Transferencia directa hacia destino final
-            For Each tiffFile In tiffGenerados
-                If token.IsCancellationRequested Then
-                    LimpiarCarpetaIncompleta(carpetaDestino)
-                    Throw New OperationCanceledException()
-                End If
-                Dim destinoFinal = Path.Combine(carpetaDestino, Path.GetFileName(tiffFile))
-                File.Copy(tiffFile, destinoFinal, True)
-            Next
 
         Catch ex As OperationCanceledException
             LimpiarCarpetaIncompleta(carpetaDestino)
@@ -817,6 +875,11 @@ Public Class FormTransferir
             LimpiarCarpetaIncompleta(carpetaDestino)
             Throw
         Finally
+            Dim dummyProc As Process = Nothing
+            Try
+                If procId > 0 Then ProcesosActivos.TryRemove(procId, dummyProc)
+            Catch
+            End Try
             Try
                 If Directory.Exists(stagingCarpeta) Then
                     Directory.Delete(stagingCarpeta, True)
@@ -840,7 +903,7 @@ Public Class FormTransferir
         Optional procesarPaginasEnParalelo As Boolean = False,
         Optional hilosParalelos As Integer = 1
     )
-        If token.IsCancellationRequested Then Throw New OperationCanceledException()
+        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
         Dim gsExe = ModuloRecursos.ObtenerRutaEjecutableGhostscript()
         If String.IsNullOrEmpty(gsExe) OrElse Not File.Exists(gsExe) Then
@@ -851,21 +914,22 @@ Public Class FormTransferir
             Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
         End If
 
-        ' Guardián de almacenamiento: Esperar disponibilidad de espacio si el disco local está en niveles críticos (< 10 GB)
-        ModuloRecursos.EsperarEspacioDisponible(10.0, token, 30000)
-
-        Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
-        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "gs_" & Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(stagingCarpeta)
+        ' Asegurar carpeta destino físicamente en almacenamiento
+        SyncLock locker
+            If Not Directory.Exists(carpetaDestino) Then
+                Directory.CreateDirectory(carpetaDestino)
+            End If
+        End SyncLock
 
         Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
         Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
+        Dim procId As Integer = 0
 
         Try
-            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
-            ' El especificador %d en Ghostscript genera _1.tiff, _2.tiff, ... (coincidencia exacta 1-based)
-            Dim patronSalida = Path.Combine(stagingCarpeta, $"{nombreBase}_%d.tiff")
+            ' El especificador %d en Ghostscript genera _1.tiff, _2.tiff, ... DIRECTAMENTE en carpetaDestino (CERO uso de C:\)
+            Dim patronSalida = Path.Combine(carpetaDestino, $"{nombreBase}_%d.tiff")
 
             Dim args As New StringBuilder()
             args.Append("-q ")
@@ -909,6 +973,8 @@ Public Class FormTransferir
                 End Sub
 
                 proc.Start()
+                procId = proc.Id
+                ProcesosActivos.TryAdd(procId, proc)
                 proc.BeginErrorReadLine()
 
                 ' Soporte de cancelación inmediata: terminar el subproceso del SO
@@ -920,8 +986,8 @@ Public Class FormTransferir
                 End Sub)
 
                     Dim ultimasPaginasLeidas As Integer = 0
-                    While Not proc.WaitForExit(1000)
-                        If token.IsCancellationRequested Then
+                    While Not proc.WaitForExit(300)
+                        If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                             Try
                                 If Not proc.HasExited Then proc.Kill()
                             Catch
@@ -929,15 +995,15 @@ Public Class FormTransferir
                             Throw New OperationCanceledException()
                         End If
 
-                        ' Monitoreo en tiempo real de páginas generadas para la UI
+                        ' Monitoreo en tiempo real de páginas generadas directamente en destino
                         Try
-                            Dim tiffsEnStaging = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.tiff").Length
-                            If tiffsEnStaging > ultimasPaginasLeidas Then
-                                ultimasPaginasLeidas = tiffsEnStaging
+                            Dim tiffsEnDestino = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.tiff").Length
+                            If tiffsEnDestino > ultimasPaginasLeidas Then
+                                ultimasPaginasLeidas = tiffsEnDestino
                                 If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
                                     Dim pct = If(paginasEsperadas > 0, CInt(Math.Min(100, (ultimasPaginasLeidas / CDbl(paginasEsperadas)) * 100)), 50)
                                     Dim totalStr = If(paginasEsperadas > 0, paginasEsperadas.ToString("#,##0"), "?")
-                                    bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {ultimasPaginasLeidas:#,##0}/{totalStr} págs [Ghostscript CLI]")
+                                    bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {ultimasPaginasLeidas:#,##0}/{totalStr} págs [Ghostscript CLI Directo]")
                                 End If
                             End If
                         Catch
@@ -946,7 +1012,7 @@ Public Class FormTransferir
 
                 End Using
 
-                If token.IsCancellationRequested Then
+                If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                     Throw New OperationCanceledException()
                 End If
 
@@ -956,30 +1022,13 @@ Public Class FormTransferir
                 End If
             End Using
 
-            ' Validar archivos generados en staging
-            Dim tiffGenerados = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.tiff")
+            ' Validar archivos generados directamente en destino final
+            Dim tiffGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.tiff")
             If tiffGenerados.Length = 0 Then
-                Throw New IOException("Ghostscript terminó la ejecución pero no generó archivos TIFF en staging.")
+                Throw New IOException("Ghostscript terminó la ejecución pero no generó archivos TIFF en destino.")
             End If
 
             totalPaginas = tiffGenerados.Length
-
-            ' Asegurar carpeta destino
-            SyncLock locker
-                If Not Directory.Exists(carpetaDestino) Then
-                    Directory.CreateDirectory(carpetaDestino)
-                End If
-            End SyncLock
-
-            ' Transferencia directa de TIFFs listos hacia destino final
-            For Each tiffFile In tiffGenerados
-                If token.IsCancellationRequested Then
-                    LimpiarCarpetaIncompleta(carpetaDestino)
-                    Throw New OperationCanceledException()
-                End If
-                Dim destinoFinal = Path.Combine(carpetaDestino, Path.GetFileName(tiffFile))
-                File.Copy(tiffFile, destinoFinal, True)
-            Next
 
         Catch ex As OperationCanceledException
             LimpiarCarpetaIncompleta(carpetaDestino)
@@ -988,11 +1037,9 @@ Public Class FormTransferir
             LimpiarCarpetaIncompleta(carpetaDestino)
             Throw
         Finally
-            ' Limpieza de carpeta temporal de staging
+            Dim dummyProc As Process = Nothing
             Try
-                If Directory.Exists(stagingCarpeta) Then
-                    Directory.Delete(stagingCarpeta, True)
-                End If
+                If procId > 0 Then ProcesosActivos.TryRemove(procId, dummyProc)
             Catch
             End Try
         End Try
@@ -1012,7 +1059,7 @@ Public Class FormTransferir
         Optional procesarPaginasEnParalelo As Boolean = False,
         Optional hilosParalelos As Integer = 1
     )
-        If token.IsCancellationRequested Then Throw New OperationCanceledException()
+        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
         If Not File.Exists(pdfPath) Then
             Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
@@ -1026,7 +1073,7 @@ Public Class FormTransferir
         Directory.CreateDirectory(stagingCarpeta)
 
         Try
-            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
             ' Determinar ruta de lectura del PDF:
             ' Si hay espacio de sobra en disco (> peso del PDF + 15 GB), copiamos a staging local para lectura NVMe ultrarrápida.
@@ -1044,7 +1091,7 @@ Public Class FormTransferir
                 End Try
             End If
 
-            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
             Dim settings As New MagickReadSettings()
             settings.Density = New Density(250, 250)
@@ -1109,7 +1156,7 @@ Public Class FormTransferir
                 Else
                     ' MODO SECUENCIAL POR PÁGINA (Cada hilo ya está convirtiendo un PDF completo diferente en paralelo)
                     For i As Integer = 0 To collection.Count - 1
-                        If token.IsCancellationRequested Then Throw New OperationCanceledException()
+                        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
                         Dim page = collection(i)
                         page.Format = MagickFormat.Tiff
@@ -1136,7 +1183,7 @@ Public Class FormTransferir
                 End If
             End Using
 
-            If token.IsCancellationRequested Then Throw New OperationCanceledException()
+            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
 
             ' 3. Asegurar carpeta destino en red
             SyncLock locker
@@ -1147,7 +1194,7 @@ Public Class FormTransferir
 
             ' 4. Transferencia de TIFFs listos en ráfaga
             For Each tiffFile In Directory.GetFiles(stagingCarpeta, "*.tiff")
-                If token.IsCancellationRequested Then
+                If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                     LimpiarCarpetaIncompleta(carpetaDestino)
                     Throw New OperationCanceledException()
                 End If

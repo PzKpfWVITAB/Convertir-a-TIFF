@@ -231,8 +231,11 @@ Public Module ModuloRecursos
             Try
                 If info.MemoriaAsignadaBytes > 0 Then
                     ResourceLimits.Memory = info.MemoriaAsignadaBytes
+                    ResourceLimits.Area = info.MemoriaAsignadaBytes
                 End If
-                ResourceLimits.Disk = ULong.MaxValue
+                ' PROHIBIR terminantemente que ImageMagick cree archivos de caché de píxeles (.cache) en el disco duro.
+                ' Todo el procesamiento debe residir estrictamente en la memoria RAM del servidor.
+                ResourceLimits.Disk = 0UL
             Catch ex As Exception
                 Debug.WriteLine("Advertencia al asignar ResourceLimits.Memory: " & ex.Message)
             End Try
@@ -247,6 +250,46 @@ Public Module ModuloRecursos
             Debug.WriteLine($"[ModuloRecursos] Magick.NET configurado: {info.MemoriaAsignadaGB} GB RAM, Staging: {rutaStaging}, Hilos recomendados: {info.HilosAsignados}")
         Catch ex As Exception
             Debug.WriteLine("Error al aplicar límites de MagickNET: " & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Limpia archivos residuales y huérfanos de ejecuciones previas (magick-*, gs_*, mu_*, stg_*, .tmp, .cache)
+    ''' en la carpeta de staging para liberar espacio inmediatamente.
+    ''' </summary>
+    Public Sub LimpiarCacheHuerfana()
+        Try
+            Dim rutaStaging = ObtenerRutaStaging()
+            If Directory.Exists(rutaStaging) Then
+                Dim dirInfo As New DirectoryInfo(rutaStaging)
+
+                ' Eliminar subcarpetas huérfanas temporales de ejecuciones anteriores
+                For Each subDir In dirInfo.GetDirectories()
+                    Try
+                        If subDir.Name.StartsWith("stg_", StringComparison.OrdinalIgnoreCase) OrElse
+                           subDir.Name.StartsWith("gs_", StringComparison.OrdinalIgnoreCase) OrElse
+                           subDir.Name.StartsWith("mu_", StringComparison.OrdinalIgnoreCase) Then
+                            subDir.Delete(True)
+                        End If
+                    Catch
+                    End Try
+                Next
+
+                ' Eliminar archivos de caché huérfanos (.cache, .tmp, magick-*)
+                For Each fi In dirInfo.GetFiles()
+                    Try
+                        If fi.Name.StartsWith("magick-", StringComparison.OrdinalIgnoreCase) OrElse
+                           fi.Extension.Equals(".cache", StringComparison.OrdinalIgnoreCase) OrElse
+                           fi.Extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase) OrElse
+                           fi.Extension.Equals(".png", StringComparison.OrdinalIgnoreCase) Then
+                            fi.Delete()
+                        End If
+                    Catch
+                    End Try
+                Next
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("Error en LimpiarCacheHuerfana: " & ex.Message)
         End Try
     End Sub
 
