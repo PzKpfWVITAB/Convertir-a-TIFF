@@ -326,11 +326,14 @@ Public Class FormTransferir
         ' Asegurar servicio de bitácora asíncrona
         ModuloBitacoraAsync.IniciarServicioBitacora()
 
+        ' RESOLVER DESTINO EFECTIVO CON LA JERARQUÍA OFICIAL DE ENTREGABLES
+        Dim destinoEfectivo As String = ResolverDestinoEfectivo(origen, destino)
+
         Dim dirInfo As New DirectoryInfo(origen)
         Dim archivos As FileInfo() = dirInfo.EnumerateFiles("*.pdf", SearchOption.AllDirectories).ToArray()
         Dim total As Integer = archivos.Length
         Dim procesados As Integer = 0
-        Dim delegacionSeleccionada As String = New DirectoryInfo(destino).Name
+        Dim delegacionSeleccionada As String = New DirectoryInfo(destinoEfectivo).Name
 
         If total = 0 Then
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | No se encontraron archivos PDF en origen: {origen}")
@@ -354,7 +357,7 @@ Public Class FormTransferir
             Throw New InvalidOperationException(msgError)
         End If
 
-        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INICIO | Motor exclusivo: MuPDF Extremo ({Path.GetFileName(rutaMu)}) | Hilos paralelos dinámicos: {maxHilos}")
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INICIO | Motor exclusivo: MuPDF Extremo ({Path.GetFileName(rutaMu)}) | Origen: {origen} | Destino efectivo: {destinoEfectivo} | Hilos paralelos dinámicos: {maxHilos}")
 
         ' Limpieza proactiva de cualquier residuo o caché huérfana antes de iniciar
         ModuloRecursos.LimpiarCacheHuerfana()
@@ -377,7 +380,7 @@ Public Class FormTransferir
                                        End If
 
                                        Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destino, archivoInfo.FullName, pagsCompletas) Then
+                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas) Then
                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                        Else
                                            bagPendientes.Add(archivoInfo)
@@ -464,7 +467,7 @@ Public Class FormTransferir
                     bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande con {maxHilos} hilos: {nombreSinExt} ({pesoMB:0.1} MB)")
                 End If
 
-                Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destino, delegacionSeleccionada, cancelToken, True, maxHilos, paginas)
+                Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, maxHilos, paginas)
                 Dim actualProcesados = Interlocked.Increment(procesados)
                 Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
 
@@ -500,7 +503,7 @@ Public Class FormTransferir
                     Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
                     Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
 
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destino, delegacionSeleccionada, cancelToken, False, 1, paginas)
+                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, False, 1, paginas)
                     Dim actualProcesados = Interlocked.Increment(procesados)
                     Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
 
@@ -521,7 +524,7 @@ Public Class FormTransferir
         ' Esperar brevemente que la cola de bitácora termine de insertar solo lo completado
         ModuloBitacoraAsync.EsperarVaciado(2500)
         ModuloRecursos.LimpiarCacheHuerfana()
-        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | FIN PROCESO | Origen: {origen} | Cancelado: {canceladoPorUsuario}")
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | FIN PROCESO | Origen: {origen} | Destino efectivo: {destinoEfectivo} | Cancelado: {canceladoPorUsuario}")
     End Sub
 
     ''' <summary>
@@ -552,7 +555,7 @@ Public Class FormTransferir
 
         Try
             Dim rutaRelativaArchivo As String = ObtenerRutaRelativa(origen, archivo)
-            Dim directorioRelativo As String = Path.GetDirectoryName(rutaRelativaArchivo)
+            Dim directorioRelativo As String = NormalizarRutaRelativa(Path.GetDirectoryName(rutaRelativaArchivo))
             Dim destinoDirectorioFinal As String = Path.Combine(destino, directorioRelativo)
 
             carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
@@ -603,6 +606,12 @@ Public Class FormTransferir
 
             ' SÓLO SI EL ARCHIVO ESTÁ FÍSICAMENTE COMPLETO, VERIFICADO Y NO HUBO CANCELACIÓN SE REGISTRA EN BD
             If archivoCompletadoConExito AndAlso Not canceladoPorUsuario Then
+                Dim delegacionArchivo As String = delegacionSeleccionada
+                Dim mDel = System.Text.RegularExpressions.Regex.Match(directorioRelativo, "(ENTREGABLE\s*\d+|ENTREGA\s*\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                If mDel.Success Then
+                    delegacionArchivo = System.Text.RegularExpressions.Regex.Replace(mDel.Value, "^ENTREGA\s*", "ENTREGABLE ", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                End If
+
                 Dim usuarioActual = If(ModuloUsuarios.UsuarioActual IsNot Nothing, ModuloUsuarios.UsuarioActual.NombreUsuario, Environment.UserName)
                 ModuloBitacoraAsync.EncolarTransferenciaTiff(
                     origen,
@@ -614,7 +623,7 @@ Public Class FormTransferir
                     "",
                     estatusFinal,
                     paginas,
-                    delegacionSeleccionada,
+                    delegacionArchivo,
                     usuarioActual,
                     anioEncontrado
                 )
@@ -901,7 +910,7 @@ Public Class FormTransferir
     Private Function EstaPdfYaProcesadoYCompleto(origenBase As String, destinoBase As String, archivoPdf As String, ByRef totalPaginas As Integer) As Boolean
         Try
             Dim rutaRelativaArchivo = ObtenerRutaRelativa(origenBase, archivoPdf)
-            Dim directorioRelativo = Path.GetDirectoryName(rutaRelativaArchivo)
+            Dim directorioRelativo = NormalizarRutaRelativa(Path.GetDirectoryName(rutaRelativaArchivo))
             Dim destinoDirectorioFinal = Path.Combine(destinoBase, directorioRelativo)
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
@@ -1052,6 +1061,62 @@ Public Class FormTransferir
         Catch ex As Exception
             Return fullPath.Replace(basePath, "").TrimStart("\"c)
         End Try
+    End Function
+
+    ''' <summary>
+    ''' Resuelve la ruta de destino efectiva asegurando la jerarquía oficial de entregables:
+    ''' Si el origen es 'ENTREGA N' (o 'ENTREGABLE N'), garantiza que el destino contenga 'ENTREGABLE N'
+    ''' sin duplicar carpetas si el usuario ya la seleccionó manualmente en el destino.
+    ''' </summary>
+    Private Function ResolverDestinoEfectivo(origen As String, destino As String) As String
+        Try
+            If String.IsNullOrWhiteSpace(origen) OrElse String.IsNullOrWhiteSpace(destino) Then
+                Return destino
+            End If
+
+            Dim nombreOrigen = Path.GetFileName(origen.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Trim()
+            Dim subCarpetaDestino = nombreOrigen
+
+            ' Normalizar variantes como "ENTREGA 3", "ENTREGA_3", "ENTREGA3" a "ENTREGABLE 3"
+            Dim mEntrega = System.Text.RegularExpressions.Regex.Match(nombreOrigen, "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            If mEntrega.Success Then
+                subCarpetaDestino = "ENTREGABLE " & mEntrega.Groups(1).Value.Trim()
+            End If
+
+            Dim nombreDestino = Path.GetFileName(destino.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Trim()
+
+            ' Si el destino ya termina en la carpeta esperada (ej: Z:\...\ENTREGABLE 3 o Z:\...\ENTREGA 3), no duplicar
+            If nombreDestino.Equals(subCarpetaDestino, StringComparison.OrdinalIgnoreCase) OrElse
+               nombreDestino.Equals(nombreOrigen, StringComparison.OrdinalIgnoreCase) Then
+                Return destino
+            End If
+
+            ' Si el origen corresponde a un entregable ("ENTREGA X" o "ENTREGABLE X"), anexarlo al destino
+            Dim esEntregable = mEntrega.Success OrElse System.Text.RegularExpressions.Regex.IsMatch(nombreOrigen, "^ENTREGABLE[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            If esEntregable Then
+                Return Path.Combine(destino, subCarpetaDestino)
+            End If
+
+            Return destino
+        Catch ex As Exception
+            Return destino
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Normaliza cualquier nivel de carpeta 'ENTREGA X' en la ruta relativa a la convención oficial 'ENTREGABLE X'.
+    ''' </summary>
+    Private Function NormalizarRutaRelativa(directorioRelativo As String) As String
+        If String.IsNullOrWhiteSpace(directorioRelativo) Then Return ""
+
+        Dim partes = directorioRelativo.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.None)
+        For i As Integer = 0 To partes.Length - 1
+            Dim m = System.Text.RegularExpressions.Regex.Match(partes(i).Trim(), "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            If m.Success Then
+                partes(i) = "ENTREGABLE " & m.Groups(1).Value.Trim()
+            End If
+        Next
+        Return Path.Combine(partes)
     End Function
 
     Private Sub bgWorker_ProgressChanged(sender As Object, e As ProgressChangedEventArgs) Handles bgWorker.ProgressChanged
