@@ -448,33 +448,46 @@ Public Class FormTransferir
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | DISTRIBUCIÓN DINÁMICA | Total: {totalPendientes} | Grandes (> 30 MB): {listaGrandes.Count} | Pequeños (<= 30 MB): {listaPequenos.Count}")
 
         ' =========================================================================
-        ' FASE 1: PDFs GRANDES (> 30 MB) — 1 DOCUMENTO A LA VEZ CON 100 HILOS EN SUS PÁGINAS
+        ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
         ' =========================================================================
-        If listaGrandes.Count > 0 Then
+        If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
+            Dim hilosGrandes = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ 2))
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) con {maxHilos} hilos por página (Protección de disco)")
+                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes con MuPDF -P multinúcleo")
             End If
 
-            For Each fileInfo In listaGrandes
-                If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then Exit For
+            Dim optionsGrandes As New ParallelOptions With {
+                .MaxDegreeOfParallelism = hilosGrandes,
+                .CancellationToken = cancelToken
+            }
 
-                Dim paginas As Integer = 0
-                Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
-                Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
+            Try
+                Dim particionadorGrandes = Partitioner.Create(listaGrandes, EnumerablePartitionerOptions.NoBuffering)
+                Parallel.ForEach(particionadorGrandes, optionsGrandes, Sub(fileInfo, loopState, loopIndex)
+                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                        loopState.Stop()
+                        Exit Sub
+                    End If
 
-                If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                    Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                    bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande con {maxHilos} hilos: {nombreSinExt} ({pesoMB:0.1} MB)")
-                End If
+                    Dim paginas As Integer = 0
+                    Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
+                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
 
-                Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, maxHilos, paginas)
-                Dim actualProcesados = Interlocked.Increment(procesados)
-                Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                        Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
+                        bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande multinúcleo: {nombreSinExt} ({pesoMB:0.1} MB)")
+                    End If
 
-                If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
-                    bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs [100 hilos] - {actualProcesados}/{totalPendientes})")
-                End If
-            Next
+                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, maxHilos, paginas)
+                    Dim actualProcesados = Interlocked.Increment(procesados)
+                    Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+
+                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
+                        bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs [MuPDF -P] - {actualProcesados}/{totalPendientes})")
+                    End If
+                End Sub)
+            Catch ex As OperationCanceledException
+            End Try
         End If
 
         ' =========================================================================
@@ -723,6 +736,8 @@ Public Class FormTransferir
 
             Dim args As New StringBuilder()
             args.Append("draw ")
+            args.Append("-q ")
+            args.Append("-P ")
             args.Append("-r 250 ")
             args.Append("-c gray ")
             args.Append($"-o ""{patronSalidaPng}"" ")
@@ -804,8 +819,8 @@ Public Class FormTransferir
                     End Try
                 End Sub)
 
-                    ' Bucle de consumo concurrente en tiempo real mientras mutool renderiza
-                    While Not proc.WaitForExit(200)
+                    ' Bucle de consumo concurrente en tiempo real mientras mutool renderiza en paralelo
+                    While Not proc.WaitForExit(75)
                         If token.IsCancellationRequested OrElse canceladoPorUsuario Then
                             Try
                                 If Not proc.HasExited Then proc.Kill()
