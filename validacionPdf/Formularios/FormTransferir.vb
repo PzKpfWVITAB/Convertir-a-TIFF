@@ -451,9 +451,11 @@ Public Class FormTransferir
         ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
         ' =========================================================================
         If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            Dim hilosGrandes = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ 2))
+            Dim hilosGrandes = Math.Max(4, Math.Min(24, CInt(Math.Floor(Environment.ProcessorCount * 0.38))))
+            Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ hilosGrandes))
+
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes con MuPDF -P multinúcleo")
+                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes ({Environment.ProcessorCount} núcleos detectados)")
             End If
 
             Dim optionsGrandes As New ParallelOptions With {
@@ -475,10 +477,10 @@ Public Class FormTransferir
 
                     If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
                         Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                        bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande multinúcleo: {nombreSinExt} ({pesoMB:0.1} MB)")
+                        bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande ({hilosGrandes} en paralelo): {nombreSinExt} ({pesoMB:0.1} MB)")
                     End If
 
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, maxHilos, paginas)
+                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, hilosEncodingPorDoc, paginas)
                     Dim actualProcesados = Interlocked.Increment(procesados)
                     Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
 
