@@ -175,11 +175,22 @@ Partial Class FormTransferir
         Me.btnConfigRecursos.Text = "⚙ Rendimiento (CPU/RAM)"
         Me.btnConfigRecursos.UseVisualStyleBackColor = True
         '
+        'btnReparar
+        '
+        Me.btnReparar.Font = New System.Drawing.Font("Microsoft Sans Serif", 10.0!)
+        Me.btnReparar.Location = New System.Drawing.Point(480, 15)
+        Me.btnReparar.Name = "btnReparar"
+        Me.btnReparar.Size = New System.Drawing.Size(240, 38)
+        Me.btnReparar.TabIndex = 16
+        Me.btnReparar.Text = "🛠️ Reparar Incompletos"
+        Me.btnReparar.UseVisualStyleBackColor = True
+        '
         'FormTransferir
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(8.0!, 16.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
         Me.ClientSize = New System.Drawing.Size(1084, 926)
+        Me.Controls.Add(Me.btnReparar)
         Me.Controls.Add(Me.btnConfigRecursos)
         Me.Controls.Add(Me.Label1)
         Me.Controls.Add(Me.dgvBitacora)
@@ -194,7 +205,7 @@ Partial Class FormTransferir
         Me.Controls.Add(Me.btnTransferir)
         Me.Margin = New System.Windows.Forms.Padding(3, 2, 3, 2)
         Me.Name = "FormTransferir"
-        Me.Text = "TRANSFERENCIA DE SELLOS NEW"
+        Me.Text = "TRANSFERENCIA DE SELLOS NEW (A JPG 200 DPI)"
         CType(Me.dgvBitacora, System.ComponentModel.ISupportInitialize).EndInit()
         CType(Me.SplitContainer1, System.ComponentModel.ISupportInitialize).EndInit()
         Me.SplitContainer1.ResumeLayout(False)
@@ -215,4 +226,5 @@ Partial Class FormTransferir
     Friend WithEvents SplitContainer1 As SplitContainer
     Friend WithEvents Label1 As Label
     Friend WithEvents btnConfigRecursos As Button
+    Friend WithEvents btnReparar As Button
 End Class

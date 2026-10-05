@@ -145,6 +145,11 @@ Public Class FormTransferir
         End If
     End Sub
 
+    Private Sub btnReparar_Click(sender As Object, e As EventArgs) Handles btnReparar.Click
+        Dim frm As New FormReparacion(rutaOrigenActual, rutaDestinoActual)
+        frm.ShowDialog(Me)
+    End Sub
+
     Private Sub ConfigurarListViews()
         With ListViewOrigen
             .View = View.Details
@@ -740,8 +745,8 @@ Public Class FormTransferir
             args.Append("draw ")
             args.Append("-q ")
             args.Append("-P ")
-            args.Append("-r 250 ")
-            args.Append("-c gray ")
+            args.Append($"-r {ModuloConversionJpg.RESOLUCION_DPI} ")
+            args.Append("-c rgb ")
             args.Append($"-o ""{patronSalidaPng}"" ")
             args.Append($"""{pdfPath}""")
 
@@ -758,7 +763,7 @@ Public Class FormTransferir
             Dim paginasEncontradas As New HashSet(Of Integer)()
             Dim lockerPaginas As New Object()
 
-            Dim codificarPngATiff = Sub(pngFile As String)
+            Dim codificarPngAJpg = Sub(pngFile As String)
                 If token.IsCancellationRequested OrElse canceladoPorUsuario Then Exit Sub
 
                 Dim nomSinExt = Path.GetFileNameWithoutExtension(pngFile)
@@ -771,15 +776,14 @@ Public Class FormTransferir
                             paginasEncontradas.Add(numPag)
                         End SyncLock
 
-                        Dim tiffDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.tiff")
+                        Dim jpgDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.jpg")
 
                         Using img As New MagickImage(pngFile)
-                            img.Format = MagickFormat.Tiff
-                            img.Settings.Compression = CompressionMethod.LZW
-                            img.ColorSpace = ColorSpace.Gray
-                            img.Density = New Density(250, 250)
+                            img.Format = MagickFormat.Jpeg
+                            img.Quality = ModuloConversionJpg.CALIDAD_JPG
+                            img.Density = New Density(ModuloConversionJpg.RESOLUCION_DPI, ModuloConversionJpg.RESOLUCION_DPI)
                             img.Alpha(AlphaOption.Remove)
-                            img.Write(tiffDestino)
+                            img.Write(jpgDestino)
                         End Using
 
                         ' BORRADO INMEDIATO DE LA IMAGEN TEMPORAL PARA CUIDAR EL DISCO
@@ -792,7 +796,7 @@ Public Class FormTransferir
                         If (compl Mod 10 = 0 OrElse compl = paginasEsperadas) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
                             Dim pct = If(paginasEsperadas > 0, CInt(Math.Min(100, (compl / CDbl(paginasEsperadas)) * 100)), 50)
                             Dim totalStr = If(paginasEsperadas > 0, paginasEsperadas.ToString("#,##0"), "?")
-                            bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {compl:#,##0}/{totalStr} págs [MuPDF Pipeline]")
+                            bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {compl:#,##0}/{totalStr} págs JPG (200 DPI)")
                         End If
                     End If
                 End If
@@ -831,7 +835,7 @@ Public Class FormTransferir
                             Throw New OperationCanceledException()
                         End If
 
-                        ' Buscar PNGs listos generados por mutool y codificarlos a TIFF LZW en paralelo
+                        ' Buscar PNGs listos generados por mutool y codificarlos a JPG en paralelo
                         Try
                             Dim archivosPng = Directory.GetFiles(stagingCarpeta, "p_*.png")
                             If archivosPng.Length > 0 Then
@@ -839,7 +843,7 @@ Public Class FormTransferir
                                 If listos.Count > 0 Then
                                     Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
                                     Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                                    Parallel.ForEach(listos, popt, codificarPngATiff)
+                                    Parallel.ForEach(listos, popt, codificarPngAJpg)
                                 End If
                             End If
                         Catch
@@ -863,16 +867,16 @@ Public Class FormTransferir
             If ultimosPng.Length > 0 Then
                 Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
                 Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                Parallel.ForEach(ultimosPng, popt, codificarPngATiff)
+                Parallel.ForEach(ultimosPng, popt, codificarPngAJpg)
             End If
 
-            ' Validar archivos TIFF finales directamente en la carpeta destino
-            Dim tiffGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.tiff")
-            If tiffGenerados.Length = 0 Then
-                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos TIFF válidos en destino.")
+            ' Validar archivos JPG finales directamente en la carpeta destino
+            Dim jpgGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.jpg")
+            If jpgGenerados.Length = 0 Then
+                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos JPG válidos en destino.")
             End If
 
-            totalPaginas = tiffGenerados.Length
+            totalPaginas = jpgGenerados.Length
 
         Catch ex As OperationCanceledException
             LimpiarCarpetaIncompleta(carpetaDestino)
@@ -919,132 +923,26 @@ Public Class FormTransferir
     End Function
 
     ''' <summary>
-    ''' Verifica de forma rápida y física si un archivo PDF ya fue transferido y completado al 100% en el destino:
+    ''' Verifica de forma rápida y física si un archivo PDF ya fue transferido y completado al 100% en el destino en JPG a 200 DPI:
     ''' 1. Comprueba si existe la carpeta del PDF en el directorio destino.
-    ''' 2. Comprueba que contenga archivos TIFF.
-    ''' 3. Ejecuta la validación física rápida de páginas y cabecera mágica (sin páginas faltantes ni corruptas).
+    ''' 2. Comprueba que contenga archivos JPG.
+    ''' 3. Ejecuta la validación física rápida de páginas y cabecera JPEG (sin páginas faltantes ni corruptas).
     ''' </summary>
     Private Function EstaPdfYaProcesadoYCompleto(origenBase As String, destinoBase As String, archivoPdf As String, ByRef totalPaginas As Integer) As Boolean
-        Try
-            Dim rutaRelativaArchivo = ObtenerRutaRelativa(origenBase, archivoPdf)
-            Dim directorioRelativo = NormalizarRutaRelativa(Path.GetDirectoryName(rutaRelativaArchivo))
-            Dim destinoDirectorioFinal = Path.Combine(destinoBase, directorioRelativo)
-            Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
-            Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
-
-            If Not Directory.Exists(carpetaPdfDestino) Then
-                Return False
-            End If
-
-            ' Si la carpeta destino existe, verificar si tiene archivos TIFF físicos
-            Dim archivosTiff = Directory.GetFiles(carpetaPdfDestino, "*.tiff")
-            If archivosTiff.Length = 0 Then
-                Return False
-            End If
-
-            ' Obtener las páginas del PDF original para comparar conteo exacto
-            Dim paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
-            If paginasEsperadas <= 0 Then
-                Return False
-            End If
-
-            totalPaginas = paginasEsperadas
-
-            ' Ejecutar la verificación física de integridad y cantidad exacta
-            Dim dummyError As String = ""
-            If ValidarIntegridadFisicaTiff(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError) Then
-                Return True
-            End If
-
-            Return False
-        Catch ex As Exception
-            Return False
-        End Try
+        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas)
     End Function
 
     ''' <summary>
     ''' Realiza una verificación física rápida y exhaustiva en disco para garantizar:
     ''' 1. Que la carpeta destino exista.
-    ''' 2. Que el conteo físico de archivos TIFF coincida exactamente con las páginas esperadas (sin páginas faltantes ni de más).
-    ''' 3. Que cada archivo consecutivo ({nombreBase}_{i}.tiff) exista físicamente en disco.
-    ''' 4. Que ningún archivo esté vacío o incompleto (tamaño > 0 y cabecera mínima >= 16 bytes).
-    ''' 5. Que la cabecera mágica corresponda a un archivo TIFF 6.0 estándar ("II*" little-endian o "MM*" big-endian).
-    ''' 6. Que la imagen sea completamente legible (validación rápida de metadatos MagickImageInfo sin decodificar píxeles).
+    ''' 2. Que el conteo físico de archivos JPG coincida exactamente con las páginas esperadas (sin páginas faltantes ni de más).
+    ''' 3. Que cada archivo consecutivo ({nombreBase}_{i}.jpg) exista físicamente en disco.
+    ''' 4. Que ningún archivo esté vacío (tamaño > 100 bytes).
+    ''' 5. Que la cabecera mágica corresponda a un archivo JPEG estándar (FF D8 FF).
+    ''' 6. Que la imagen sea completamente legible (validación rápida de metadatos MagickImageInfo).
     ''' </summary>
     Private Function ValidarIntegridadFisicaTiff(carpetaDestino As String, nombreBase As String, totalPaginasEsperadas As Integer, ByRef mensajeError As String) As Boolean
-        Try
-            If Not Directory.Exists(carpetaDestino) Then
-                mensajeError = "La carpeta de destino no existe físicamente en el almacenamiento."
-                Return False
-            End If
-
-            If totalPaginasEsperadas <= 0 Then
-                mensajeError = "El número de páginas esperadas es 0 o inválido."
-                Return False
-            End If
-
-            ' 1. Obtener todos los archivos TIFF en la carpeta destino
-            Dim archivosTiff = Directory.GetFiles(carpetaDestino, "*.tiff")
-
-            ' 2. Validación estricta de cantidad: no pueden haber menos páginas ni archivos sobrantes
-            If archivosTiff.Length <> totalPaginasEsperadas Then
-                mensajeError = $"Discrepancia en páginas físicas: se esperaban {totalPaginasEsperadas} páginas pero hay {archivosTiff.Length} archivos TIFF en disco."
-                Return False
-            End If
-
-            ' 3. Validación archivo por archivo de cada página esperada
-            For i As Integer = 1 To totalPaginasEsperadas
-                Dim archivoEsperado = Path.Combine(carpetaDestino, $"{nombreBase}_{i}.tiff")
-
-                If Not File.Exists(archivoEsperado) Then
-                    mensajeError = $"Falta la página física requerida: {nombreBase}_{i}.tiff"
-                    Return False
-                End If
-
-                Dim fi As New FileInfo(archivoEsperado)
-                If fi.Length < 16 Then
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está dañado o vacío (tamaño: {fi.Length} bytes)."
-                    Return False
-                End If
-
-                ' 4. Verificación ultrarrápida de Magic Bytes TIFF (TIFF 6.0: II* o MM*)
-                Using fs As New FileStream(archivoEsperado, FileMode.Open, FileAccess.Read, FileShare.Read)
-                    Dim header(3) As Byte
-                    Dim leidos = fs.Read(header, 0, 4)
-                    If leidos < 4 Then
-                        mensajeError = $"No se pudo leer la cabecera del archivo {Path.GetFileName(archivoEsperado)}."
-                        Return False
-                    End If
-
-                    Dim esLittleEndian = (header(0) = &H49 AndAlso header(1) = &H49 AndAlso header(2) = &H2A AndAlso header(3) = &H0)
-                    Dim esBigEndian = (header(0) = &H4D AndAlso header(1) = &H4D AndAlso header(2) = &H0 AndAlso header(3) = &H2A)
-
-                    If Not esLittleEndian AndAlso Not esBigEndian Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} no contiene una cabecera TIFF válida (archivo corrupto)."
-                        Return False
-                    End If
-                End Using
-
-                ' 5. Validación rápida de estructura de imagen con ImageMagick (Ping de metadatos sin descomprimir píxeles)
-                Try
-                    Dim info As New MagickImageInfo(archivoEsperado)
-                    If info.Width <= 0 OrElse info.Height <= 0 OrElse info.Format <> MagickFormat.Tiff Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} tiene dimensiones o formato TIFF inválidos ({info.Width}x{info.Height})."
-                        Return False
-                    End If
-                Catch exMagick As Exception
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está dañado e ilegible: {exMagick.Message}"
-                    Return False
-                End Try
-            Next
-
-            mensajeError = ""
-            Return True
-
-        Catch ex As Exception
-            mensajeError = "Excepción durante la verificación física de archivos: " & ex.Message
-            Return False
-        End Try
+        Return ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestino, nombreBase, totalPaginasEsperadas, mensajeError)
     End Function
 
     Private Sub LimpiarCarpetaIncompleta(carpeta As String)
@@ -1140,7 +1038,7 @@ Public Class FormTransferir
         If e.UserState IsNot Nothing Then
             Dim str = e.UserState.ToString()
             If str.StartsWith("STATUS|") Then
-                Me.Text = "Transferir a TIFF — " & str.Substring(7)
+                Me.Text = "Transferir a JPG (200 DPI) — " & str.Substring(7)
             ElseIf str.Contains("|") Then
                 Dim partes = str.Split("|"c)
                 dgvBitacora.Rows.Add(partes(0).Trim(), partes(1).Trim())
