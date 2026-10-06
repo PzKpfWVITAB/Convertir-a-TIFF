@@ -633,7 +633,7 @@ Public Class FormTransferir
                 End If
 
                 Dim usuarioActual = If(ModuloUsuarios.UsuarioActual IsNot Nothing, ModuloUsuarios.UsuarioActual.NombreUsuario, Environment.UserName)
-                ModuloBitacoraAsync.EncolarTransferenciaTiff(
+                ModuloBitacoraAsync.EncolarTransferenciaJpg(
                     origen,
                     Path.GetDirectoryName(archivo),
                     carpetaPdfDestino,

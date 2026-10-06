@@ -486,7 +486,12 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
-    ''' Consulta en la tabla bitacora_transferencia_tiff el estatus de un documento por nombre o nombre_original.
+    ''' Nombre de la tabla principal de bitácora para transferencias a JPG.
+    ''' </summary>
+    Public Property NombreTablaBitacora As String = "bitacora_transferencia_jpg"
+
+    ''' <summary>
+    ''' Consulta en la tabla bitacora_transferencia_jpg el estatus de un documento por nombre o nombre_original.
     ''' </summary>
     Public Function ConsultarRegistroEnBd(nombreDocumento As String) As InfoRegistroBd
         Dim info As New InfoRegistroBd()
@@ -496,24 +501,35 @@ Public Module ModuloConversionJpg
 
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
-                Dim sql = "SELECT estatus, paginas, error, fecha FROM bitacora_transferencia_tiff " &
-                          "WHERE (documento = @nom1 OR documento = @nom2 OR nombre_original = @nom1 OR nombre_original = @nom2) " &
-                          "ORDER BY id DESC LIMIT 1"
-                Using cmd As New MySqlCommand(sql, conn)
-                    cmd.Parameters.AddWithValue("@nom1", nombreSinExt)
-                    cmd.Parameters.AddWithValue("@nom2", nombreConExt)
-                    Using dr = cmd.ExecuteReader()
-                        If dr.Read() Then
-                            info.Encontrado = True
-                            info.Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString())
-                            info.Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas")))
-                            info.ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString())
-                            If Not IsDBNull(dr("fecha")) Then
-                                info.Fecha = Convert.ToDateTime(dr("fecha"))
-                            End If
-                        End If
-                    End Using
-                End Using
+                Dim tabla = NombreTablaBitacora
+                Dim queryOk As Boolean = False
+
+                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
+                    Try
+                        Dim sql = $"SELECT estatus, paginas, error, fecha FROM {tbl} " &
+                                  "WHERE (documento = @nom1 OR documento = @nom2 OR nombre_original = @nom1 OR nombre_original = @nom2) " &
+                                  "ORDER BY id DESC LIMIT 1"
+                        Using cmd As New MySqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@nom1", nombreSinExt)
+                            cmd.Parameters.AddWithValue("@nom2", nombreConExt)
+                            Using dr = cmd.ExecuteReader()
+                                If dr.Read() Then
+                                    info.Encontrado = True
+                                    info.Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString())
+                                    info.Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas")))
+                                    info.ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString())
+                                    If Not IsDBNull(dr("fecha")) Then
+                                        info.Fecha = Convert.ToDateTime(dr("fecha"))
+                                    End If
+                                End If
+                            End Using
+                        End Using
+                        queryOk = True
+                        Exit For
+                    Catch exTbl As MySqlException When exTbl.Number = 1146
+                        ' Si la tabla no existe, probar con la siguiente tabla de compatibilidad
+                    End Try
+                Next
             End Using
         Catch ex As Exception
             info.ErrorMsg = ex.Message
@@ -539,42 +555,51 @@ Public Module ModuloConversionJpg
         Try
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
-                ' Primero intentar actualizar si ya existía para mantener la base de datos limpia y cuadrada
-                Dim sqlUpdate = "UPDATE bitacora_transferencia_tiff SET " &
-                                "estatus = 'OK', paginas = @pag, error = '', usuario = @usr, fecha = NOW(), " &
-                                "carpeta_destino = @dest WHERE documento = @doc OR nombre_original = @orig"
-                Dim filasActualizadas As Integer = 0
-                Using cmdUpdate As New MySqlCommand(sqlUpdate, conn)
-                    cmdUpdate.Parameters.AddWithValue("@pag", paginas)
-                    cmdUpdate.Parameters.AddWithValue("@usr", usuario)
-                    cmdUpdate.Parameters.AddWithValue("@dest", carpetaDestino)
-                    cmdUpdate.Parameters.AddWithValue("@doc", documento)
-                    cmdUpdate.Parameters.AddWithValue("@orig", nombreOriginal)
-                    filasActualizadas = cmdUpdate.ExecuteNonQuery()
-                End Using
+                Dim tabla = NombreTablaBitacora
 
-                If filasActualizadas = 0 Then
-                    Dim sqlInsert = "INSERT INTO bitacora_transferencia_tiff " &
-                                    "(disk, carpeta_origen, carpeta_destino, documento, nombre_original, nombre_nuevo, error, estatus, paginas, delegacion, usuario, anio, fecha) " &
-                                    "VALUES (@disk, @origen, @destino, @doc, @orig, @nuevo, '', 'OK', @pag, @deleg, @usr, @anio, NOW())"
-                    Using cmdInsert As New MySqlCommand(sqlInsert, conn)
-                        cmdInsert.Parameters.AddWithValue("@disk", disk)
-                        cmdInsert.Parameters.AddWithValue("@origen", carpetaOrigen)
-                        cmdInsert.Parameters.AddWithValue("@destino", carpetaDestino)
-                        cmdInsert.Parameters.AddWithValue("@doc", documento)
-                        cmdInsert.Parameters.AddWithValue("@orig", nombreOriginal)
-                        cmdInsert.Parameters.AddWithValue("@nuevo", nombreNuevo)
-                        cmdInsert.Parameters.AddWithValue("@pag", paginas)
-                        cmdInsert.Parameters.AddWithValue("@deleg", delegacion)
-                        cmdInsert.Parameters.AddWithValue("@usr", usuario)
-                        cmdInsert.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(anio), DBNull.Value, CObj(anio)))
-                        cmdInsert.ExecuteNonQuery()
-                    End Using
-                End If
+                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
+                    Try
+                        ' Primero intentar actualizar si ya existía para mantener la base de datos limpia y cuadrada
+                        Dim sqlUpdate = $"UPDATE {tbl} SET " &
+                                        "estatus = 'OK', paginas = @pag, error = '', usuario = @usr, fecha = NOW(), " &
+                                        "carpeta_destino = @dest WHERE documento = @doc OR nombre_original = @orig"
+                        Dim filasActualizadas As Integer = 0
+                        Using cmdUpdate As New MySqlCommand(sqlUpdate, conn)
+                            cmdUpdate.Parameters.AddWithValue("@pag", paginas)
+                            cmdUpdate.Parameters.AddWithValue("@usr", usuario)
+                            cmdUpdate.Parameters.AddWithValue("@dest", carpetaDestino)
+                            cmdUpdate.Parameters.AddWithValue("@doc", documento)
+                            cmdUpdate.Parameters.AddWithValue("@orig", nombreOriginal)
+                            filasActualizadas = cmdUpdate.ExecuteNonQuery()
+                        End Using
+
+                        If filasActualizadas = 0 Then
+                            Dim sqlInsert = $"INSERT INTO {tbl} " &
+                                            "(disk, carpeta_origen, carpeta_destino, documento, nombre_original, nombre_nuevo, error, estatus, paginas, delegacion, usuario, anio, fecha) " &
+                                            "VALUES (@disk, @origen, @destino, @doc, @orig, @nuevo, '', 'OK', @pag, @deleg, @usr, @anio, NOW())"
+                            Using cmdInsert As New MySqlCommand(sqlInsert, conn)
+                                cmdInsert.Parameters.AddWithValue("@disk", disk)
+                                cmdInsert.Parameters.AddWithValue("@origen", carpetaOrigen)
+                                cmdInsert.Parameters.AddWithValue("@destino", carpetaDestino)
+                                cmdInsert.Parameters.AddWithValue("@doc", documento)
+                                cmdInsert.Parameters.AddWithValue("@orig", nombreOriginal)
+                                cmdInsert.Parameters.AddWithValue("@nuevo", nombreNuevo)
+                                cmdInsert.Parameters.AddWithValue("@pag", paginas)
+                                cmdInsert.Parameters.AddWithValue("@deleg", delegacion)
+                                cmdInsert.Parameters.AddWithValue("@usr", usuario)
+                                cmdInsert.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(anio), DBNull.Value, CObj(anio)))
+                                cmdInsert.ExecuteNonQuery()
+                            End Using
+                        End If
+                        Exit For
+                    Catch exTbl As MySqlException When exTbl.Number = 1146
+                        ' Si la tabla no existe, probar con la alternativa
+                    End Try
+                Next
             End Using
         Catch ex As Exception
             ' Fallback asíncrono o bitácora local
-            ModuloBitacoraAsync.EncolarTransferenciaTiff(
+            ModuloBitacoraAsync.EncolarTransferenciaJpg(
                 disk, carpetaOrigen, carpetaDestino, documento, nombreOriginal, nombreNuevo, "", "OK", paginas, delegacion, usuario, anio
             )
         End Try

@@ -87,7 +87,7 @@ Public Module ModuloBitacoraAsync
         AutoReset.Set()
     End Sub
 
-    Public Sub EncolarTransferenciaTiff(
+    Public Sub EncolarTransferenciaJpg(
         disk As String,
         carpetaOrigen As String,
         carpetaDestino As String,
@@ -121,6 +121,23 @@ Public Module ModuloBitacoraAsync
 
         ColaBitacora.Enqueue(item)
         AutoReset.Set()
+    End Sub
+
+    Public Sub EncolarTransferenciaTiff(
+        disk As String,
+        carpetaOrigen As String,
+        carpetaDestino As String,
+        documento As String,
+        nombreOriginal As String,
+        nombreNuevo As String,
+        errorMsg As String,
+        estatus As String,
+        paginas As Integer,
+        delegacion As String,
+        usuario As String,
+        anio As String
+    )
+        EncolarTransferenciaJpg(disk, carpetaOrigen, carpetaDestino, documento, nombreOriginal, nombreNuevo, errorMsg, estatus, paginas, delegacion, usuario, anio)
     End Sub
 
     ''' <summary>
@@ -191,27 +208,47 @@ Public Module ModuloBitacoraAsync
                             End Using
 
                         ElseIf item.Tipo = TipoRegistroBitacora.TransferenciaTiff Then
-                            Dim queryTiff As String = "
-                                INSERT INTO bitacora_transferencia_tiff
+                            Dim queryJpg As String = "
+                                INSERT INTO bitacora_transferencia_jpg
                                 (disk, carpeta_origen, carpeta_destino, documento, nombre_original, nombre_nuevo, error, estatus, paginas, delegacion, usuario, anio, fecha)
                                 VALUES
                                 (@disk, @carpeta_origen, @carpeta_destino, @documento, @nombre_original, @nombre_nuevo, @error, @estatus, @paginas, @delegacion, @usuario, @anio, NOW())
                             "
-                            Using cmd As New MySqlCommand(queryTiff, conn, trans)
-                                cmd.Parameters.AddWithValue("@disk", item.Disk)
-                                cmd.Parameters.AddWithValue("@carpeta_origen", item.CarpetaOrigen)
-                                cmd.Parameters.AddWithValue("@carpeta_destino", item.CarpetaDestino)
-                                cmd.Parameters.AddWithValue("@documento", item.Documento)
-                                cmd.Parameters.AddWithValue("@nombre_original", item.NombreOriginal)
-                                cmd.Parameters.AddWithValue("@nombre_nuevo", item.NombreNuevo)
-                                cmd.Parameters.AddWithValue("@error", item.ErrorMsg)
-                                cmd.Parameters.AddWithValue("@estatus", item.Estatus)
-                                cmd.Parameters.AddWithValue("@paginas", item.Paginas)
-                                cmd.Parameters.AddWithValue("@delegacion", item.Delegacion)
-                                cmd.Parameters.AddWithValue("@usuario", item.Usuario)
-                                cmd.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(item.Anio), DBNull.Value, item.Anio))
-                                cmd.ExecuteNonQuery()
-                            End Using
+                            Try
+                                Using cmd As New MySqlCommand(queryJpg, conn, trans)
+                                    cmd.Parameters.AddWithValue("@disk", item.Disk)
+                                    cmd.Parameters.AddWithValue("@carpeta_origen", item.CarpetaOrigen)
+                                    cmd.Parameters.AddWithValue("@carpeta_destino", item.CarpetaDestino)
+                                    cmd.Parameters.AddWithValue("@documento", item.Documento)
+                                    cmd.Parameters.AddWithValue("@nombre_original", item.NombreOriginal)
+                                    cmd.Parameters.AddWithValue("@nombre_nuevo", item.NombreNuevo)
+                                    cmd.Parameters.AddWithValue("@error", item.ErrorMsg)
+                                    cmd.Parameters.AddWithValue("@estatus", item.Estatus)
+                                    cmd.Parameters.AddWithValue("@paginas", item.Paginas)
+                                    cmd.Parameters.AddWithValue("@delegacion", item.Delegacion)
+                                    cmd.Parameters.AddWithValue("@usuario", item.Usuario)
+                                    cmd.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(item.Anio), DBNull.Value, item.Anio))
+                                    cmd.ExecuteNonQuery()
+                                End Using
+                            Catch exTbl As MySqlException When exTbl.Number = 1146
+                                ' Fallback de compatibilidad si la tabla se llama bitacora_transferencia_tiff
+                                Dim queryTiff As String = queryJpg.Replace("bitacora_transferencia_jpg", "bitacora_transferencia_tiff")
+                                Using cmdFallback As New MySqlCommand(queryTiff, conn, trans)
+                                    cmdFallback.Parameters.AddWithValue("@disk", item.Disk)
+                                    cmdFallback.Parameters.AddWithValue("@carpeta_origen", item.CarpetaOrigen)
+                                    cmdFallback.Parameters.AddWithValue("@carpeta_destino", item.CarpetaDestino)
+                                    cmdFallback.Parameters.AddWithValue("@documento", item.Documento)
+                                    cmdFallback.Parameters.AddWithValue("@nombre_original", item.NombreOriginal)
+                                    cmdFallback.Parameters.AddWithValue("@nombre_nuevo", item.NombreNuevo)
+                                    cmdFallback.Parameters.AddWithValue("@error", item.ErrorMsg)
+                                    cmdFallback.Parameters.AddWithValue("@estatus", item.Estatus)
+                                    cmdFallback.Parameters.AddWithValue("@paginas", item.Paginas)
+                                    cmdFallback.Parameters.AddWithValue("@delegacion", item.Delegacion)
+                                    cmdFallback.Parameters.AddWithValue("@usuario", item.Usuario)
+                                    cmdFallback.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(item.Anio), DBNull.Value, item.Anio))
+                                    cmdFallback.ExecuteNonQuery()
+                                End Using
+                            End Try
                         End If
                     Next
 
