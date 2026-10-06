@@ -139,6 +139,7 @@ Public Class FormReparacion
         Try
             Await Task.Run(Sub()
                                ' 1. Obtener todos los archivos PDF en origen
+                               Me.BeginInvoke(Sub() lblStatus.Text = "Buscando archivos PDF en la carpeta de origen...")
                                Dim archivosPdf = Directory.EnumerateFiles(origen, "*.pdf", SearchOption.AllDirectories).ToArray()
                                Dim total = archivosPdf.Length
 
@@ -150,13 +151,29 @@ Public Class FormReparacion
                                    Exit Sub
                                End If
 
+                               ' 2. Cargar la base de datos completa en memoria en UN SOLO VIAJE (O(1))
+                               Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice de base de datos en memoria para máxima velocidad...")
+                               Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+
                                Dim contadorProgreso As Integer = 0
+                               Dim swRelojUI = Diagnostics.Stopwatch.StartNew()
+                               Dim bagItems As New ConcurrentBag(Of ItemDiagnostico)()
 
-                               For Each rutaPdf In archivosPdf
-                                   If token.IsCancellationRequested Then Exit For
+                               ' 3. Análisis masivo multinúcleo concurrente
+                               Dim numHilos = Math.Max(8, Math.Min(32, Environment.ProcessorCount))
+                               Dim popt As New ParallelOptions With {
+                                   .MaxDegreeOfParallelism = numHilos,
+                                   .CancellationToken = token
+                               }
 
-                                   Dim item = AnalizarUnPdf(origen, destinoEfectivo, rutaPdf)
-                                   listaCompletaItems.Add(item)
+                               Parallel.ForEach(archivosPdf, popt, Sub(rutaPdf, loopState)
+                                   If token.IsCancellationRequested Then
+                                       loopState.Stop()
+                                       Exit Sub
+                                   End If
+
+                                   Dim item = AnalizarUnPdfOptimizado(origen, destinoEfectivo, rutaPdf, mapaBd)
+                                   bagItems.Add(item)
 
                                    If item.Estado.StartsWith("⚠️") OrElse item.Estado.StartsWith("📁") Then
                                        Interlocked.Increment(totalIncompletos)
@@ -168,19 +185,27 @@ Public Class FormReparacion
 
                                    Dim actual = Interlocked.Increment(contadorProgreso)
 
-                                   If actual Mod 20 = 0 OrElse actual = total Then
-                                       Dim pct = CInt((actual / CDbl(total)) * 100)
-                                       Me.BeginInvoke(Sub()
-                                                          progressBar1.Value = Math.Min(100, pct)
-                                                          lblStatus.Text = $"Analizando: {actual:#,##0} de {total:#,##0} ({Path.GetFileName(rutaPdf)})"
-                                                          lblEstadisticas.Text = $"Analizados: {actual:#,##0}/{total:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
-                                                      End Sub)
+                                   ' Actualizar interfaz por lotes en tiempo real sin saturar el hilo principal
+                                   If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
+                                       SyncLock swRelojUI
+                                           If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
+                                               swRelojUI.Restart()
+                                               Dim pct = CInt((actual / CDbl(total)) * 100)
+                                               Me.BeginInvoke(Sub()
+                                                                  progressBar1.Value = Math.Min(100, pct)
+                                                                  lblStatus.Text = $"Analizando a alta velocidad ({numHilos} núcleos): {actual:#,##0} de {total:#,##0}..."
+                                                                  lblEstadisticas.Text = $"Analizados: {actual:#,##0}/{total:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
+                                                              End Sub)
+                                           End If
+                                       End SyncLock
                                    End If
-                               Next
+                               End Sub)
+
+                               listaCompletaItems = bagItems.OrderBy(Function(i) i.Documento).ToList()
                            End Sub, token)
 
             ActualizarVistaGrilla()
-            lblStatus.Text = $"Análisis finalizado. {totalIncompletos} incompletos y {totalFaltantes} faltantes detectados."
+            lblStatus.Text = $"Análisis finalizado a máxima velocidad. {totalIncompletos:#,##0} incompletos y {totalFaltantes:#,##0} faltantes detectados."
             lblEstadisticas.Text = $"Total: {listaCompletaItems.Count:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
 
             btnReparar.Enabled = (totalIncompletos + totalFaltantes > 0)
@@ -195,7 +220,15 @@ Public Class FormReparacion
         End Try
     End Sub
 
-    Private Function AnalizarUnPdf(origenBase As String, destinoBase As String, rutaPdf As String) As ItemDiagnostico
+    ''' <summary>
+    ''' Auditoría ultrarrápida: consulta la BD en RAM (0 ms) y solo examina a fondo los que tienen discrepancias físicas.
+    ''' </summary>
+    Private Function AnalizarUnPdfOptimizado(
+        origenBase As String,
+        destinoBase As String,
+        rutaPdf As String,
+        mapaBd As Dictionary(Of String, ModuloConversionJpg.InfoRegistroBd)
+    ) As ItemDiagnostico
         Dim item As New ItemDiagnostico()
         item.RutaPdf = rutaPdf
         item.Documento = Path.GetFileName(rutaPdf)
@@ -209,30 +242,25 @@ Public Class FormReparacion
         item.CarpetaOrigen = Path.GetDirectoryName(rutaPdf)
         item.CarpetaDestino = carpetaDestinoEsperada
 
-        ' 1. Obtener páginas esperadas del PDF
-        Dim pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
-        item.PagsEsperadas = pagsEsperadas
-
-        If pagsEsperadas <= 0 Then
-            item.Estado = "❌ PDF no legible o corrupto"
-            item.Detalle = "No se pudieron leer las páginas del PDF origen"
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-            Return item
+        ' 1. Consulta ultrarrápida en memoria (O(1))
+        Dim infoBd As ModuloConversionJpg.InfoRegistroBd = Nothing
+        If mapaBd IsNot Nothing Then
+            If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
+                mapaBd.TryGetValue(item.Documento, infoBd)
+            End If
         End If
 
-        ' 2. Consultar Base de Datos
-        Dim infoBd = ModuloConversionJpg.ConsultarRegistroEnBd(nombreSinExt)
-        If infoBd.Encontrado Then
+        If infoBd IsNot Nothing AndAlso infoBd.Encontrado Then
             item.EnBd = If(infoBd.Estatus = "OK", "Sí (OK)", $"Error ({infoBd.Estatus})")
         Else
             item.EnBd = "No"
         End If
 
-        ' 3. Inspeccionar disco físico en destino
+        ' 2. Inspección rápida de disco en destino
         If Not Directory.Exists(carpetaDestinoEsperada) Then
             item.Estado = "❌ Faltante total"
             item.JpgsFisicos = 0
+            item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
             item.Detalle = "La carpeta destino no existe físicamente en el almacenamiento."
             item.EsIncompletoOFaltante = True
             item.Seleccionado = True
@@ -244,7 +272,30 @@ Public Class FormReparacion
 
         If archivosJpg.Length = 0 Then
             item.Estado = "📁 Carpeta vacía"
+            item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
             item.Detalle = "La carpeta existe pero está vacía (0 imágenes JPG generadas)."
+            item.EsIncompletoOFaltante = True
+            item.Seleccionado = True
+            Return item
+        End If
+
+        ' 3. Vía rápida para los ya completados y registrados en BD (Evita leer 100,000 PDFs por red SMB)
+        If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas = archivosJpg.Length Then
+            item.PagsEsperadas = infoBd.Paginas
+            item.Estado = "✔️ Correcto (OK)"
+            item.Detalle = "Físico completo y verificado contra registro en BD."
+            item.EsIncompletoOFaltante = False
+            item.Seleccionado = False
+            Return item
+        End If
+
+        ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
+        Dim pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+        item.PagsEsperadas = pagsEsperadas
+
+        If pagsEsperadas <= 0 Then
+            item.Estado = "❌ PDF no legible o corrupto"
+            item.Detalle = "No se pudieron leer las páginas del PDF origen"
             item.EsIncompletoOFaltante = True
             item.Seleccionado = True
             Return item
@@ -259,7 +310,7 @@ Public Class FormReparacion
             Return item
         End If
 
-        ' Si la cantidad es igual o mayor, validar integridad estricta
+        ' 5. Validación de integridad física estricta
         Dim errorIntegridad As String = ""
         Dim validoFisicamente = ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestinoEsperada, nombreSinExt, pagsEsperadas, errorIntegridad)
 
@@ -271,8 +322,8 @@ Public Class FormReparacion
             Return item
         End If
 
-        ' Físicamente está completo. Verificar concordancia con la BD
-        If infoBd.Encontrado AndAlso infoBd.Estatus = "OK" Then
+        ' 6. Verificación de concordancia final
+        If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" Then
             item.Estado = "✔️ Correcto (OK)"
             item.Detalle = "Físico completo y registrado en BD con estatus OK."
             item.EsIncompletoOFaltante = False
@@ -287,14 +338,21 @@ Public Class FormReparacion
         Return item
     End Function
 
+    Private Function AnalizarUnPdf(origenBase As String, destinoBase As String, rutaPdf As String) As ItemDiagnostico
+        Return AnalizarUnPdfOptimizado(origenBase, destinoBase, rutaPdf, Nothing)
+    End Function
+
     Private Sub ActualizarVistaGrilla()
+        dgvArchivos.SuspendLayout()
         dgvArchivos.Rows.Clear()
         Dim filtrar = chkSoloIncompletos.Checked
 
-        For Each item In listaCompletaItems
-            If filtrar AndAlso Not item.EsIncompletoOFaltante Then Continue For
+        Dim itemsMostrar = If(filtrar, listaCompletaItems.Where(Function(it) it.EsIncompletoOFaltante).ToList(), listaCompletaItems)
+        Dim filasNuevas As New List(Of DataGridViewRow)(Math.Min(itemsMostrar.Count, 5000))
 
-            Dim idx = dgvArchivos.Rows.Add(
+        For Each item In itemsMostrar
+            Dim fila As New DataGridViewRow()
+            fila.CreateCells(dgvArchivos,
                 item.Seleccionado,
                 item.Estado,
                 item.Documento,
@@ -305,8 +363,6 @@ Public Class FormReparacion
                 item.CarpetaOrigen,
                 item.Detalle
             )
-
-            Dim fila = dgvArchivos.Rows(idx)
             fila.Tag = item
 
             ' Coloreado semántico
@@ -320,7 +376,15 @@ Public Class FormReparacion
                 fila.Cells(ColEstado.Index).Style.BackColor = Color.FromArgb(255, 225, 225)
                 fila.Cells(ColEstado.Index).Style.ForeColor = Color.FromArgb(180, 20, 20)
             End If
+
+            filasNuevas.Add(fila)
         Next
+
+        If filasNuevas.Count > 0 Then
+            dgvArchivos.Rows.AddRange(filasNuevas.ToArray())
+        End If
+
+        dgvArchivos.ResumeLayout()
     End Sub
 
     Private Sub chkSoloIncompletos_CheckedChanged(sender As Object, e As EventArgs) Handles chkSoloIncompletos.CheckedChanged

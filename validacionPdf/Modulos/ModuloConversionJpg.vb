@@ -538,6 +538,56 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
+    ''' Carga masivamente todos los registros de la bitácora en un diccionario en memoria (O(1)).
+    ''' Evita hacer 100,000 conexiones individuales a la base de datos, acelerando el análisis de horas a segundos.
+    ''' </summary>
+    Public Function CargarDiccionarioBitacoraEnMemoria() As Dictionary(Of String, InfoRegistroBd)
+        Dim dict As New Dictionary(Of String, InfoRegistroBd)(StringComparer.OrdinalIgnoreCase)
+        Try
+            Using conn As New MySqlConnection(CadenaConexionMysql)
+                conn.Open()
+                Dim tabla = NombreTablaBitacora
+
+                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
+                    Try
+                        Dim sql = $"SELECT documento, nombre_original, estatus, paginas, error FROM {tbl}"
+                        Using cmd As New MySqlCommand(sql, conn)
+                            cmd.CommandTimeout = 120
+                            Using dr = cmd.ExecuteReader()
+                                While dr.Read()
+                                    Dim doc = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim())
+                                    Dim orig = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim())
+                                    Dim info As New InfoRegistroBd With {
+                                        .Encontrado = True,
+                                        .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
+                                        .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
+                                        .ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString().Trim())
+                                    }
+
+                                    If Not String.IsNullOrEmpty(doc) Then
+                                        dict(doc) = info
+                                        dict(Path.GetFileNameWithoutExtension(doc)) = info
+                                    End If
+                                    If Not String.IsNullOrEmpty(orig) Then
+                                        dict(orig) = info
+                                        dict(Path.GetFileNameWithoutExtension(orig)) = info
+                                    End If
+                                End While
+                            End Using
+                        End Using
+                        Exit For
+                    Catch exTbl As MySqlException When exTbl.Number = 1146
+                        ' Probar tabla alternativa
+                    End Try
+                Next
+            End Using
+        Catch ex As Exception
+            Debug.WriteLine("Error al cargar diccionario masivo de BD: " & ex.Message)
+        End Try
+        Return dict
+    End Function
+
+    ''' <summary>
     ''' Registra o actualiza en la base de datos MySQL el archivo procesado/reparado con estatus OK.
     ''' </summary>
     Public Sub RegistrarExitoEnBd(
