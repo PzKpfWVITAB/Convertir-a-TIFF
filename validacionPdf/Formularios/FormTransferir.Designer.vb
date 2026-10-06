@@ -25,6 +25,7 @@ Partial Class FormTransferir
         Me.btnTransferir = New System.Windows.Forms.Button()
         Me.btnCancelar = New System.Windows.Forms.Button()
         Me.btnConfigRecursos = New System.Windows.Forms.Button()
+        Me.btnReparar = New System.Windows.Forms.Button()
         Me.dgvBitacora = New System.Windows.Forms.DataGridView()
         Me.bgWorker = New System.ComponentModel.BackgroundWorker()
         Me.ListBoxOrigen = New System.Windows.Forms.ListBox()

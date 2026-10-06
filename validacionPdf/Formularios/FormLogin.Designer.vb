@@ -31,6 +31,7 @@ Partial Class FormLogin
         Me.itemDelegaciones = New System.Windows.Forms.ToolStripMenuItem()
         Me.itemAuditoria = New System.Windows.Forms.ToolStripMenuItem()
         Me.itemRecursos = New System.Windows.Forms.ToolStripMenuItem()
+        Me.itemReparacion = New System.Windows.Forms.ToolStripMenuItem()
         Me.ButtonLotes = New System.Windows.Forms.Button()
         Me.btnTransferirIrec = New System.Windows.Forms.Button()
         Me.msLogin.SuspendLayout()
