@@ -160,7 +160,7 @@ Public Class FormReparacion
                                Dim bagItems As New ConcurrentBag(Of ItemDiagnostico)()
 
                                ' 3. Análisis masivo multinúcleo concurrente
-                               Dim numHilos = Math.Max(8, Math.Min(32, Environment.ProcessorCount))
+                               Dim numHilos = Math.Max(4, ModuloRecursos.ObtenerHilosOptimos())
                                Dim popt As New ParallelOptions With {
                                    .MaxDegreeOfParallelism = numHilos,
                                    .CancellationToken = token
