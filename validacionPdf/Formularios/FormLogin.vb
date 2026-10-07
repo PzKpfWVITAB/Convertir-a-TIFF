@@ -120,6 +120,13 @@ Public Class FormLogin
         End If
     End Sub
 
+    Private Sub itemReparacion_Click(sender As Object, e As EventArgs) Handles itemReparacion.Click
+        If ValidarAdmin() Then
+            Dim frm As New FormReparacion()
+            frm.ShowDialog()
+        End If
+    End Sub
+
     Private Sub txtPin_KeyPress(sender As Object, e As KeyPressEventArgs) Handles txtPin.KeyPress
         ' Solo permitir números en el PIN
         If Not Char.IsDigit(e.KeyChar) AndAlso e.KeyChar <> ControlChars.Back Then

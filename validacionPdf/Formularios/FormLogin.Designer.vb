@@ -31,6 +31,7 @@ Partial Class FormLogin
         Me.itemDelegaciones = New System.Windows.Forms.ToolStripMenuItem()
         Me.itemAuditoria = New System.Windows.Forms.ToolStripMenuItem()
         Me.itemRecursos = New System.Windows.Forms.ToolStripMenuItem()
+        Me.itemReparacion = New System.Windows.Forms.ToolStripMenuItem()
         Me.ButtonLotes = New System.Windows.Forms.Button()
         Me.btnTransferirIrec = New System.Windows.Forms.Button()
         Me.msLogin.SuspendLayout()
@@ -126,7 +127,7 @@ Partial Class FormLogin
         '
         'itemOpciones
         '
-        Me.itemOpciones.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.itemUsuarios, Me.itemAnios, Me.itemDelegaciones, Me.itemAuditoria, Me.itemRecursos})
+        Me.itemOpciones.DropDownItems.AddRange(New System.Windows.Forms.ToolStripItem() {Me.itemUsuarios, Me.itemAnios, Me.itemDelegaciones, Me.itemAuditoria, Me.itemRecursos, Me.itemReparacion})
         Me.itemOpciones.Name = "itemOpciones"
         Me.itemOpciones.Size = New System.Drawing.Size(179, 24)
         Me.itemOpciones.Text = "⚙ Opciones de Admin"
@@ -160,6 +161,12 @@ Partial Class FormLogin
         Me.itemRecursos.Name = "itemRecursos"
         Me.itemRecursos.Size = New System.Drawing.Size(268, 26)
         Me.itemRecursos.Text = "Rendimiento y Recursos (CPU/RAM)"
+        '
+        'itemReparacion
+        '
+        Me.itemReparacion.Name = "itemReparacion"
+        Me.itemReparacion.Size = New System.Drawing.Size(268, 26)
+        Me.itemReparacion.Text = "🛠️ Reparar Archivos Incompletos (TIFF)"
         '
         'ButtonLotes
         '
@@ -232,6 +239,7 @@ Partial Class FormLogin
     Friend WithEvents itemDelegaciones As ToolStripMenuItem
     Friend WithEvents itemAuditoria As ToolStripMenuItem
     Friend WithEvents itemRecursos As ToolStripMenuItem
+    Friend WithEvents itemReparacion As ToolStripMenuItem
     Friend WithEvents ButtonLotes As Button
     Friend WithEvents btnTransferirIrec As Button
 End Class

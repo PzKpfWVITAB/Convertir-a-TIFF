@@ -145,6 +145,11 @@ Public Class FormTransferir
         End If
     End Sub
 
+    Private Sub btnReparar_Click(sender As Object, e As EventArgs) Handles btnReparar.Click
+        Dim frm As New FormReparacion(rutaOrigenActual, rutaDestinoActual)
+        frm.ShowDialog(Me)
+    End Sub
+
     Private Sub ConfigurarListViews()
         With ListViewOrigen
             .View = View.Details

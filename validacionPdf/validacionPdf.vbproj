@@ -291,6 +291,14 @@
     <Compile Include="Modulos\ModuloDirectorios.vb" />
     <Compile Include="Modulos\ModuloRecursos.vb" />
     <Compile Include="Modulos\ModuloBitacoraAsync.vb" />
+    <Compile Include="Modulos\ModuloConversionTiff.vb" />
+    <Compile Include="Formularios\FormReparacion.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Formularios\FormReparacion.Designer.vb">
+      <DependentUpon>FormReparacion.vb</DependentUpon>
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Formularios\FormConfigRecursos.vb">
       <SubType>Form</SubType>
     </Compile>

@@ -25,6 +25,7 @@ Partial Class FormTransferir
         Me.btnTransferir = New System.Windows.Forms.Button()
         Me.btnCancelar = New System.Windows.Forms.Button()
         Me.btnConfigRecursos = New System.Windows.Forms.Button()
+        Me.btnReparar = New System.Windows.Forms.Button()
         Me.dgvBitacora = New System.Windows.Forms.DataGridView()
         Me.bgWorker = New System.ComponentModel.BackgroundWorker()
         Me.ListBoxOrigen = New System.Windows.Forms.ListBox()
@@ -175,11 +176,22 @@ Partial Class FormTransferir
         Me.btnConfigRecursos.Text = "⚙ Rendimiento (CPU/RAM)"
         Me.btnConfigRecursos.UseVisualStyleBackColor = True
         '
+        'btnReparar
+        '
+        Me.btnReparar.Font = New System.Drawing.Font("Microsoft Sans Serif", 10.0!)
+        Me.btnReparar.Location = New System.Drawing.Point(480, 15)
+        Me.btnReparar.Name = "btnReparar"
+        Me.btnReparar.Size = New System.Drawing.Size(240, 38)
+        Me.btnReparar.TabIndex = 16
+        Me.btnReparar.Text = "🛠️ Reparar Incompletos"
+        Me.btnReparar.UseVisualStyleBackColor = True
+        '
         'FormTransferir
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(8.0!, 16.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
         Me.ClientSize = New System.Drawing.Size(1084, 926)
+        Me.Controls.Add(Me.btnReparar)
         Me.Controls.Add(Me.btnConfigRecursos)
         Me.Controls.Add(Me.Label1)
         Me.Controls.Add(Me.dgvBitacora)
@@ -215,4 +227,5 @@ Partial Class FormTransferir
     Friend WithEvents SplitContainer1 As SplitContainer
     Friend WithEvents Label1 As Label
     Friend WithEvents btnConfigRecursos As Button
+    Friend WithEvents btnReparar As Button
 End Class
