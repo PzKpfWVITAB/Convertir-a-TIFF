@@ -172,33 +172,48 @@ Public Class FormReparacion
                                        Exit Sub
                                    End If
 
-                                   Dim item = AnalizarUnPdfOptimizado(origen, destinoEfectivo, rutaPdf, mapaBd)
-                                   bagItems.Add(item)
+                                   Try
+                                       Dim item = AnalizarUnPdfOptimizado(origen, destinoEfectivo, rutaPdf, mapaBd)
+                                       bagItems.Add(item)
 
-                                   If item.Estado.StartsWith("⚠️") OrElse item.Estado.StartsWith("📁") Then
-                                       Interlocked.Increment(totalIncompletos)
-                                   ElseIf item.Estado.StartsWith("❌") Then
+                                       If item.Estado.StartsWith("⚠️") OrElse item.Estado.StartsWith("📁") Then
+                                           Interlocked.Increment(totalIncompletos)
+                                       ElseIf item.Estado.StartsWith("❌") Then
+                                           Interlocked.Increment(totalFaltantes)
+                                       Else
+                                           Interlocked.Increment(totalCorrectos)
+                                       End If
+                                   Catch exItem As Exception
+                                       Dim errItem As New ItemDiagnostico With {
+                                           .RutaPdf = rutaPdf,
+                                           .Documento = Path.GetFileName(rutaPdf),
+                                           .CarpetaOrigen = Path.GetDirectoryName(rutaPdf),
+                                           .Estado = "❌ Error lectura/red",
+                                           .Detalle = exItem.Message,
+                                           .EsIncompletoOFaltante = True,
+                                           .Seleccionado = True
+                                       }
+                                       bagItems.Add(errItem)
                                        Interlocked.Increment(totalFaltantes)
-                                   Else
-                                       Interlocked.Increment(totalCorrectos)
-                                   End If
+                                       EscribirLogReparador($"[ERROR_CRITICO_ANALISIS_HILO] {rutaPdf} -> {exItem.GetType().Name}: {exItem.Message}")
+                                   Finally
+                                       Dim actual = Interlocked.Increment(contadorProgreso)
 
-                                   Dim actual = Interlocked.Increment(contadorProgreso)
-
-                                   ' Actualizar interfaz por lotes en tiempo real sin saturar el hilo principal
-                                   If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
-                                       SyncLock swRelojUI
-                                           If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
-                                               swRelojUI.Restart()
-                                               Dim pct = CInt((actual / CDbl(total)) * 100)
-                                               Me.BeginInvoke(Sub()
-                                                                  progressBar1.Value = Math.Min(100, pct)
-                                                                  lblStatus.Text = $"Analizando a alta velocidad ({numHilos} núcleos): {actual:#,##0} de {total:#,##0}..."
-                                                                  lblEstadisticas.Text = $"Analizados: {actual:#,##0}/{total:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
-                                                              End Sub)
-                                           End If
-                                       End SyncLock
-                                   End If
+                                       ' Actualizar interfaz por lotes en tiempo real sin saturar el hilo principal
+                                       If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
+                                           SyncLock swRelojUI
+                                               If swRelojUI.ElapsedMilliseconds >= 250 OrElse actual = total Then
+                                                   swRelojUI.Restart()
+                                                   Dim pct = CInt((actual / CDbl(total)) * 100)
+                                                   Me.BeginInvoke(Sub()
+                                                                      progressBar1.Value = Math.Min(100, pct)
+                                                                      lblStatus.Text = $"Analizando a alta velocidad ({numHilos} núcleos): {actual:#,##0} de {total:#,##0}..."
+                                                                      lblEstadisticas.Text = $"Analizados: {actual:#,##0}/{total:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
+                                                                  End Sub)
+                                               End If
+                                           End SyncLock
+                                       End If
+                                   End Try
                                End Sub)
 
                                listaCompletaItems = bagItems.OrderBy(Function(i) i.Documento).ToList()
@@ -213,7 +228,15 @@ Public Class FormReparacion
         Catch ex As OperationCanceledException
             lblStatus.Text = "Análisis detenido por el usuario."
         Catch ex As Exception
-            MessageBox.Show("Error durante el análisis: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Dim mensajeError As String = ex.Message
+            If TypeOf ex Is AggregateException Then
+                Dim agg = DirectCast(ex, AggregateException).Flatten()
+                mensajeError = String.Join(Environment.NewLine, agg.InnerExceptions.Select(Function(ie) $"{ie.GetType().Name}: {ie.Message}"))
+            ElseIf ex.InnerException IsNot Nothing Then
+                mensajeError &= Environment.NewLine & $"Detalle: {ex.InnerException.Message}"
+            End If
+            EscribirLogReparador($"[EXCEPCION_GENERAL_ANALISIS] {mensajeError}")
+            MessageBox.Show("Error durante el análisis:" & Environment.NewLine & Environment.NewLine & mensajeError, "Error en Análisis", MessageBoxButtons.OK, MessageBoxIcon.Error)
             lblStatus.Text = "Error en el análisis."
         Finally
             ConfigurarUiEstado(False)
@@ -242,100 +265,110 @@ Public Class FormReparacion
         item.CarpetaOrigen = Path.GetDirectoryName(rutaPdf)
         item.CarpetaDestino = carpetaDestinoEsperada
 
-        ' 1. Consulta ultrarrápida en memoria (O(1))
-        Dim infoBd As ModuloConversionJpg.InfoRegistroBd = Nothing
-        If mapaBd IsNot Nothing Then
-            If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
-                mapaBd.TryGetValue(item.Documento, infoBd)
+        Try
+            ' 1. Consulta ultrarrápida en memoria (O(1))
+            Dim infoBd As ModuloConversionJpg.InfoRegistroBd = Nothing
+            If mapaBd IsNot Nothing Then
+                If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
+                    mapaBd.TryGetValue(item.Documento, infoBd)
+                End If
             End If
-        End If
 
-        If infoBd IsNot Nothing AndAlso infoBd.Encontrado Then
-            item.EnBd = If(infoBd.Estatus = "OK", "Sí (OK)", $"Error ({infoBd.Estatus})")
-        Else
-            item.EnBd = "No"
-        End If
+            If infoBd IsNot Nothing AndAlso infoBd.Encontrado Then
+                item.EnBd = If(infoBd.Estatus = "OK", "Sí (OK)", $"Error ({infoBd.Estatus})")
+            Else
+                item.EnBd = "No"
+            End If
 
-        ' 2. Inspección rápida de disco en destino
-        If Not Directory.Exists(carpetaDestinoEsperada) Then
-            item.Estado = "❌ Faltante total"
-            item.JpgsFisicos = 0
-            item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
-            item.Detalle = "La carpeta destino no existe físicamente en el almacenamiento."
+            ' 2. Inspección rápida de disco en destino
+            If Not Directory.Exists(carpetaDestinoEsperada) Then
+                item.Estado = "❌ Faltante total"
+                item.JpgsFisicos = 0
+                item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                item.Detalle = "La carpeta destino no existe físicamente en el almacenamiento."
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+                Return item
+            End If
+
+            Dim archivosJpg = Directory.GetFiles(carpetaDestinoEsperada, "*.jpg")
+            item.JpgsFisicos = archivosJpg.Length
+
+            If archivosJpg.Length = 0 Then
+                item.Estado = "📁 Carpeta vacía"
+                item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                item.Detalle = "La carpeta existe pero está vacía (0 imágenes JPG generadas)."
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+                Return item
+            End If
+
+            ' 3. Vía rápida para los ya completados y registrados en BD (Evita leer 100,000 PDFs por red SMB)
+            If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas = archivosJpg.Length Then
+                item.PagsEsperadas = infoBd.Paginas
+                item.Estado = "✔️ Correcto (OK)"
+                item.Detalle = "Físico completo y verificado contra registro en BD."
+                item.EsIncompletoOFaltante = False
+                item.Seleccionado = False
+                Return item
+            End If
+
+            ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
+            Dim pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+            item.PagsEsperadas = pagsEsperadas
+
+            If pagsEsperadas <= 0 Then
+                item.Estado = "❌ PDF no legible o corrupto"
+                item.Detalle = "No se pudieron leer las páginas del PDF origen"
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+                Return item
+            End If
+
+            If archivosJpg.Length < pagsEsperadas Then
+                Dim faltan = pagsEsperadas - archivosJpg.Length
+                item.Estado = $"⚠️ Incompleto (faltan {faltan} págs)"
+                item.Detalle = $"Se esperaban {pagsEsperadas} JPGs pero solo hay {archivosJpg.Length}."
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+                Return item
+            End If
+
+            ' 5. Validación de integridad física estricta
+            Dim errorIntegridad As String = ""
+            Dim validoFisicamente = ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestinoEsperada, nombreSinExt, pagsEsperadas, errorIntegridad)
+
+            If Not validoFisicamente Then
+                item.Estado = "⚠️ Incompleto (Daño)"
+                item.Detalle = errorIntegridad
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+                Return item
+            End If
+
+            ' 6. Verificación de concordancia final
+            If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" Then
+                item.Estado = "✔️ Correcto (OK)"
+                item.Detalle = "Físico completo y registrado en BD con estatus OK."
+                item.EsIncompletoOFaltante = False
+                item.Seleccionado = False
+            Else
+                item.Estado = "⚠️ Físico OK (Falta en BD)"
+                item.Detalle = "Imágenes JPG completas en disco pero falta confirmar en BD."
+                item.EsIncompletoOFaltante = True
+                item.Seleccionado = True
+            End If
+
+            Return item
+
+        Catch ex As Exception
+            item.Estado = "❌ Error lectura/red"
+            item.Detalle = $"Error al inspeccionar archivo o red: {ex.Message}"
             item.EsIncompletoOFaltante = True
             item.Seleccionado = True
+            EscribirLogReparador($"[ERROR_ANALISIS_ARCHIVO] {rutaPdf} -> {ex.GetType().Name}: {ex.Message}")
             Return item
-        End If
-
-        Dim archivosJpg = Directory.GetFiles(carpetaDestinoEsperada, "*.jpg")
-        item.JpgsFisicos = archivosJpg.Length
-
-        If archivosJpg.Length = 0 Then
-            item.Estado = "📁 Carpeta vacía"
-            item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
-            item.Detalle = "La carpeta existe pero está vacía (0 imágenes JPG generadas)."
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-            Return item
-        End If
-
-        ' 3. Vía rápida para los ya completados y registrados en BD (Evita leer 100,000 PDFs por red SMB)
-        If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas = archivosJpg.Length Then
-            item.PagsEsperadas = infoBd.Paginas
-            item.Estado = "✔️ Correcto (OK)"
-            item.Detalle = "Físico completo y verificado contra registro en BD."
-            item.EsIncompletoOFaltante = False
-            item.Seleccionado = False
-            Return item
-        End If
-
-        ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
-        Dim pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
-        item.PagsEsperadas = pagsEsperadas
-
-        If pagsEsperadas <= 0 Then
-            item.Estado = "❌ PDF no legible o corrupto"
-            item.Detalle = "No se pudieron leer las páginas del PDF origen"
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-            Return item
-        End If
-
-        If archivosJpg.Length < pagsEsperadas Then
-            Dim faltan = pagsEsperadas - archivosJpg.Length
-            item.Estado = $"⚠️ Incompleto (faltan {faltan} págs)"
-            item.Detalle = $"Se esperaban {pagsEsperadas} JPGs pero solo hay {archivosJpg.Length}."
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-            Return item
-        End If
-
-        ' 5. Validación de integridad física estricta
-        Dim errorIntegridad As String = ""
-        Dim validoFisicamente = ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestinoEsperada, nombreSinExt, pagsEsperadas, errorIntegridad)
-
-        If Not validoFisicamente Then
-            item.Estado = "⚠️ Incompleto (Daño)"
-            item.Detalle = errorIntegridad
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-            Return item
-        End If
-
-        ' 6. Verificación de concordancia final
-        If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" Then
-            item.Estado = "✔️ Correcto (OK)"
-            item.Detalle = "Físico completo y registrado en BD con estatus OK."
-            item.EsIncompletoOFaltante = False
-            item.Seleccionado = False
-        Else
-            item.Estado = "⚠️ Físico OK (Falta en BD)"
-            item.Detalle = "Imágenes JPG completas en disco pero falta confirmar en BD."
-            item.EsIncompletoOFaltante = True
-            item.Seleccionado = True
-        End If
-
-        Return item
+        End Try
     End Function
 
     Private Function AnalizarUnPdf(origenBase As String, destinoBase As String, rutaPdf As String) As ItemDiagnostico
@@ -543,7 +576,15 @@ Public Class FormReparacion
         Catch ex As OperationCanceledException
             lblStatus.Text = "Reparación detenida por el usuario."
         Catch ex As Exception
-            MessageBox.Show("Error durante la reparación: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            Dim mensajeError As String = ex.Message
+            If TypeOf ex Is AggregateException Then
+                Dim agg = DirectCast(ex, AggregateException).Flatten()
+                mensajeError = String.Join(Environment.NewLine, agg.InnerExceptions.Select(Function(ie) $"{ie.GetType().Name}: {ie.Message}"))
+            ElseIf ex.InnerException IsNot Nothing Then
+                mensajeError &= Environment.NewLine & $"Detalle: {ex.InnerException.Message}"
+            End If
+            EscribirLogReparador($"[EXCEPCION_GENERAL_REPARACION] {mensajeError}")
+            MessageBox.Show("Error durante la reparación:" & Environment.NewLine & Environment.NewLine & mensajeError, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
             ConfigurarUiEstado(False)
         End Try
@@ -678,6 +719,24 @@ Public Class FormReparacion
                 e.Cancel = True
             End If
         End If
+    End Sub
+
+    Private Sub EscribirLogReparador(mensaje As String)
+        Try
+            Dim linea = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | {mensaje}"
+            Dim rutas = {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "depuracion_reparador.log"),
+                Path.Combine(Path.GetTempPath(), "depuracion_reparador.log")
+            }
+            For Each r In rutas
+                Try
+                    File.AppendAllText(r, linea & Environment.NewLine)
+                    Exit For
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
     End Sub
 
 End Class
