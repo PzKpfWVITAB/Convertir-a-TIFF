@@ -318,8 +318,7 @@ Public Module ModuloConversionJpg
 
     ''' <summary>
     ''' Comprueba rápidamente si un PDF ya fue convertido completamente en formato JPG.
-    ''' Puede utilizar un diccionario en memoria de la base de datos (si se proporciona) para evitar
-    ''' abrir el PDF por red en absoluto. Realiza validación ultrarrápida de integridad física.
+    ''' Realiza un conteo directo en destino y utiliza el mapa en memoria de la BD para máxima velocidad.
     ''' </summary>
     Public Function EstaPdfYaProcesadoYCompletoJpg(
         origenBase As String,
@@ -335,33 +334,39 @@ Public Module ModuloConversionJpg
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
 
+            ' 1. Si la carpeta no existe, descartar al instante (0 ms)
             If Not Directory.Exists(carpetaPdfDestino) Then Return False
 
+            ' 2. Conteo directo de archivos JPG en la carpeta destino
             Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
-            If archivosJpg.Length = 0 Then Return False
+            Dim conteoDestino = archivosJpg.Length
+            If conteoDestino = 0 Then Return False
 
             Dim paginasEsperadas As Integer = 0
 
-            ' 1. Si tenemos mapa en memoria de la BD y reporta estatus 'OK', usar sus páginas directamente sin abrir el PDF remoto
+            ' 3. Consultar la BD en RAM: si ya reporta estatus 'OK' y coincide con el conteo físico, validar cabeceras al vuelo
             If mapaBd IsNot Nothing Then
                 Dim infoBd As InfoRegistroBd = Nothing
                 If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
+                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas = conteoDestino Then
                         paginasEsperadas = infoBd.Paginas
                     End If
                 End If
             End If
 
-            ' 2. Si no se obtuvo de la BD, obtener páginas del PDF (solo si la carpeta destino tiene archivos)
+            ' 4. Si no coincidió con la BD o no estaba en ella, consultar páginas del PDF
             If paginasEsperadas <= 0 Then
                 paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
             End If
 
-            If paginasEsperadas <= 0 Then Return False
+            ' 5. Si no se pudieron determinar páginas o el conteo físico en destino no coincide exactamente con el PDF
+            If paginasEsperadas <= 0 OrElse conteoDestino <> paginasEsperadas Then
+                Return False
+            End If
 
             totalPaginas = paginasEsperadas
 
-            ' 3. Usar validación rápida de diagnóstico (comprueba conteo exacto y cabeceras JPG en 1ms, sin Magick ping masivo)
+            ' 6. Verificación rápida de cabeceras de página inicial y final (1 ms) para garantizar integridad
             Dim dummyError As String = ""
             Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError)
         Catch
