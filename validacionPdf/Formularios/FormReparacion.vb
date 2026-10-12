@@ -314,12 +314,7 @@ Public Class FormReparacion
             End If
 
             ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
-            Dim pagsEsperadas As Integer = 0
-            If infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
-                pagsEsperadas = infoBd.Paginas
-            Else
-                pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
-            End If
+            Dim pagsEsperadas As Integer = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
             item.PagsEsperadas = pagsEsperadas
 
             If pagsEsperadas <= 0 Then

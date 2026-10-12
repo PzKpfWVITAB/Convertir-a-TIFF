@@ -629,7 +629,7 @@ Public Module ModuloConversionJpg
 
                 For Each tbl In {tabla, "bitacora_transferencia_tiff"}
                     Try
-                        Dim sql = $"SELECT documento, nombre_original, estatus, paginas, error FROM {tbl}"
+                        Dim sql = $"SELECT documento, nombre_original, estatus, paginas, error FROM {tbl} ORDER BY id ASC"
                         Using cmd As New MySqlCommand(sql, conn)
                             cmd.CommandTimeout = 120
                             Using dr = cmd.ExecuteReader()
