@@ -1,6 +1,7 @@
-﻿Imports System.Collections.Concurrent
+Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
+Imports System.Text
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -135,6 +136,7 @@ Public Class FormReparacion
         Dim totalIncompletos As Integer = 0
         Dim totalFaltantes As Integer = 0
         Dim totalCorrectos As Integer = 0
+        Dim swCronometroTotal = Diagnostics.Stopwatch.StartNew()
 
         Try
             Await Task.Run(Sub()
@@ -155,12 +157,14 @@ Public Class FormReparacion
                                Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice de base de datos en memoria para máxima velocidad...")
                                Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
 
+                               ' 3. Análisis masivo multinúcleo concurrente
+                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
+                               EscribirLogReparador($"[INICIO_ANALISIS] Origen='{origen}' | Destino='{destinoEfectivo}' | TotalPDFs={total:#,##0} | Hilos={numHilos} | RegistrosEnBD={If(mapaBd IsNot Nothing, mapaBd.Count, 0):#,##0}")
+
                                Dim contadorProgreso As Integer = 0
                                Dim swRelojUI = Diagnostics.Stopwatch.StartNew()
                                Dim bagItems As New ConcurrentBag(Of ItemDiagnostico)()
 
-                               ' 3. Análisis masivo multinúcleo concurrente
-                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
                                Dim popt As New ParallelOptions With {
                                    .MaxDegreeOfParallelism = numHilos,
                                    .CancellationToken = token
@@ -224,9 +228,11 @@ Public Class FormReparacion
             lblEstadisticas.Text = $"Total: {listaCompletaItems.Count:#,##0} | Correctos: {totalCorrectos:#,##0} | Incompletos: {totalIncompletos:#,##0} | Faltantes: {totalFaltantes:#,##0}"
 
             btnReparar.Enabled = (totalIncompletos + totalFaltantes > 0)
+            EscribirLogReparador($"[FIN_ANALISIS] Total={listaCompletaItems.Count:#,##0} | Correctos={totalCorrectos:#,##0} | Incompletos={totalIncompletos:#,##0} | Faltantes={totalFaltantes:#,##0} | Tiempo={swCronometroTotal.Elapsed.TotalSeconds:F2}s")
 
         Catch ex As OperationCanceledException
             lblStatus.Text = "Análisis detenido por el usuario."
+            EscribirLogReparador("[CANCELADO_ANALISIS] Operación cancelada por el usuario.")
         Catch ex As Exception
             Dim mensajeError As String = ex.Message
             If TypeOf ex Is AggregateException Then
@@ -284,10 +290,18 @@ Public Class FormReparacion
             If Not Directory.Exists(carpetaDestinoEsperada) Then
                 item.Estado = "❌ Faltante total"
                 item.JpgsFisicos = 0
-                item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
-                item.Detalle = "La carpeta destino no existe físicamente en el almacenamiento."
+                ' Si no está en BD o BD tenía 0, leer las páginas reales del PDF físico
+                Dim pags As Integer = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                If pags <= 0 Then
+                    pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+                End If
+                item.PagsEsperadas = pags
+                item.Detalle = If(pags > 0,
+                    $"La carpeta destino no existe físicamente en el almacenamiento. (Se creará con sus {pags} páginas al reparar)",
+                    "La carpeta destino no existe y no se pudieron leer las páginas del PDF origen.")
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ANALISIS_FALTANTE_TOTAL] PDF='{rutaPdf}' | Pags={pags} | Destino='{carpetaDestinoEsperada}'")
                 Return item
             End If
 
@@ -296,10 +310,18 @@ Public Class FormReparacion
 
             If archivosJpg.Length = 0 Then
                 item.Estado = "📁 Carpeta vacía"
-                item.PagsEsperadas = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
-                item.Detalle = "La carpeta existe pero está vacía (0 imágenes JPG generadas)."
+                ' Si no está en BD o BD tenía 0, leer las páginas reales del PDF físico
+                Dim pags As Integer = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                If pags <= 0 Then
+                    pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+                End If
+                item.PagsEsperadas = pags
+                item.Detalle = If(pags > 0,
+                    $"La carpeta existe pero está vacía (0 imágenes JPG generadas). Se reparará con sus {pags} páginas.",
+                    "La carpeta existe pero está vacía y no se pudieron leer las páginas del PDF origen.")
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ANALISIS_CARPETA_VACIA] PDF='{rutaPdf}' | Pags={pags} | Destino='{carpetaDestinoEsperada}'")
                 Return item
             End If
 
@@ -313,15 +335,16 @@ Public Class FormReparacion
                 Return item
             End If
 
-            ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
+            ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con múltiples motores
             Dim pagsEsperadas As Integer = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
             item.PagsEsperadas = pagsEsperadas
 
             If pagsEsperadas <= 0 Then
                 item.Estado = "❌ PDF no legible o corrupto"
-                item.Detalle = "No se pudieron leer las páginas del PDF origen"
+                item.Detalle = "No se pudieron leer las páginas del PDF origen (0 páginas)"
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ERROR_PAGINAS_CERO] PDF='{rutaPdf}' no devolvió páginas legibles en ningún motor.")
                 Return item
             End If
 
@@ -331,6 +354,7 @@ Public Class FormReparacion
                 item.Detalle = $"Se esperaban {pagsEsperadas} JPGs pero solo hay {archivosJpg.Length}."
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ANALISIS_INCOMPLETO] PDF='{rutaPdf}' | Esperadas={pagsEsperadas} | Encontradas={archivosJpg.Length} | Faltan={faltan}")
                 Return item
             End If
 
@@ -343,6 +367,7 @@ Public Class FormReparacion
                 item.Detalle = errorIntegridad
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ANALISIS_INTEGRIDAD_FALLIDA] PDF='{rutaPdf}' | Detalle='{errorIntegridad}'")
                 Return item
             End If
 
@@ -357,6 +382,7 @@ Public Class FormReparacion
                 item.Detalle = "Imágenes JPG completas en disco pero falta confirmar en BD."
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
+                EscribirLogReparador($"[ANALISIS_FALTA_EN_BD] PDF='{rutaPdf}' | Físico tiene {archivosJpg.Length} JPGs pero falta en BD.")
             End If
 
             Return item
@@ -465,6 +491,7 @@ Public Class FormReparacion
         progressBar1.Value = 0
 
         Dim maxHilos = Math.Max(2, Math.Min(Environment.ProcessorCount, ModuloRecursos.ObtenerHilosOptimos()))
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos.")
 
         Try
             Await Task.Run(Sub()
@@ -489,16 +516,16 @@ Public Class FormReparacion
 
                                    Try
                                        ModuloConversionJpg.ConvertirPdfJpgMuPdf(
-                                           item.RutaPdf,
-                                           carpetaDestino,
-                                           nombreSinExt,
-                                           totalPags,
-                                           token,
-                                           False,
-                                           1,
-                                           Nothing,
-                                           ProcesosConversion
-                                       )
+                                            item.RutaPdf,
+                                            carpetaDestino,
+                                            nombreSinExt,
+                                            totalPags,
+                                            token,
+                                            False,
+                                            1,
+                                            Nothing,
+                                            ProcesosConversion
+                                        )
 
                                        ' 3. Validación física de integridad
                                        If ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestino, nombreSinExt, totalPags, msgError) Then
@@ -525,17 +552,17 @@ Public Class FormReparacion
                                        Dim delegacion = Path.GetFileName(Path.GetDirectoryName(carpetaDestino))
 
                                        ModuloConversionJpg.RegistrarExitoEnBd(
-                                           ModuloConversionJpg.ObtenerRutaRelativa(txtOrigen.Text, item.RutaPdf),
-                                           item.CarpetaOrigen,
-                                           carpetaDestino,
-                                           item.Documento,
-                                           item.Documento,
-                                           item.Documento,
-                                           totalPags,
-                                           delegacion,
-                                           usuario,
-                                           anioStr
-                                       )
+                                            ModuloConversionJpg.ObtenerRutaRelativa(txtOrigen.Text, item.RutaPdf),
+                                            item.CarpetaOrigen,
+                                            carpetaDestino,
+                                            item.Documento,
+                                            item.Documento,
+                                            item.Documento,
+                                            totalPags,
+                                            delegacion,
+                                            usuario,
+                                            anioStr
+                                        )
 
                                        item.Estado = "✔️ Reparado OK"
                                        item.Detalle = $"Reparación exitosa: {totalPags} páginas JPG (200 DPI) generadas y registradas en BD."
@@ -545,10 +572,12 @@ Public Class FormReparacion
                                        item.EsIncompletoOFaltante = False
                                        item.Seleccionado = False
                                        Interlocked.Increment(reparadosOk)
+                                       EscribirLogReparador($"[REPARADO_OK] PDF='{item.RutaPdf}' -> {totalPags} páginas generadas en '{carpetaDestino}'")
                                    Else
                                        item.Estado = "❌ Error al reparar"
                                        item.Detalle = msgError
                                        Interlocked.Increment(fallados)
+                                       EscribirLogReparador($"[ERROR_REPARACION] PDF='{item.RutaPdf}' -> Error: {msgError}")
                                    End If
 
                                    Dim actual = Interlocked.Increment(procesados)
@@ -563,6 +592,7 @@ Public Class FormReparacion
                            End Sub, token)
 
             ActualizarVistaGrilla()
+            EscribirLogReparador($"[FIN_REPARACION] Total={total} | ReparadosOK={reparadosOk} | Fallados={fallados}")
             MessageBox.Show(
                 $"Reparación completada.{vbCrLf}{vbCrLf}" &
                 $"✔️ Reparados con éxito: {reparadosOk}{vbCrLf}" &
@@ -721,20 +751,52 @@ Public Class FormReparacion
         End If
     End Sub
 
+    Private Shared ReadOnly _lockLogReparador As New Object()
+
     Private Sub EscribirLogReparador(mensaje As String)
         Try
             Dim linea = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} | {mensaje}"
-            Dim rutas = {
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "depuracion_reparador.log"),
-                Path.Combine(Path.GetTempPath(), "depuracion_reparador.log")
-            }
-            For Each r In rutas
-                Try
-                    File.AppendAllText(r, linea & Environment.NewLine)
-                    Exit For
-                Catch
-                End Try
-            Next
+            Dim nombresArchivos = {"depuracion_reparador.txt", "depuracion_reparador.log"}
+
+            Dim carpetasDestino As New List(Of String)()
+
+            Try
+                If Not String.IsNullOrEmpty(Application.StartupPath) AndAlso Directory.Exists(Application.StartupPath) Then
+                    carpetasDestino.Add(Application.StartupPath)
+                End If
+            Catch
+            End Try
+
+            Try
+                If Not String.IsNullOrEmpty(AppDomain.CurrentDomain.BaseDirectory) AndAlso Directory.Exists(AppDomain.CurrentDomain.BaseDirectory) Then
+                    If Not carpetasDestino.Contains(AppDomain.CurrentDomain.BaseDirectory) Then
+                        carpetasDestino.Add(AppDomain.CurrentDomain.BaseDirectory)
+                    End If
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim tempDir = Path.GetTempPath()
+                If Not String.IsNullOrEmpty(tempDir) AndAlso Directory.Exists(tempDir) Then
+                    If Not carpetasDestino.Contains(tempDir) Then
+                        carpetasDestino.Add(tempDir)
+                    End If
+                End If
+            Catch
+            End Try
+
+            SyncLock _lockLogReparador
+                For Each carpeta In carpetasDestino
+                    For Each nombre In nombresArchivos
+                        Try
+                            Dim rutaArchivo = Path.Combine(carpeta, nombre)
+                            File.AppendAllText(rutaArchivo, linea & Environment.NewLine, Encoding.UTF8)
+                        Catch
+                        End Try
+                    Next
+                Next
+            End SyncLock
         Catch
         End Try
     End Sub

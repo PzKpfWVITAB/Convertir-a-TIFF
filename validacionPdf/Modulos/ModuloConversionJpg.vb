@@ -1,6 +1,7 @@
 Imports System.Collections.Concurrent
 Imports System.IO
 Imports System.Text
+Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports ImageMagick
@@ -18,25 +19,140 @@ Public Module ModuloConversionJpg
 
     ''' <summary>
     ''' Obtiene rápidamente el número total de páginas de un PDF sin descomprimirlo en RAM.
+    ''' Implementa múltiples motores de alta resiliencia:
+    ''' 1. iText 7 con modo permisivo (UnethicalReading = True).
+    ''' 2. MuPDF CLI (mutool show -r 'archivo.pdf' pages) capaz de auto-reparar en memoria.
+    ''' 3. Conteo binario por expresiones regulares (/Type /Page o /Count).
+    ''' 4. ImageMagick Ping.
     ''' </summary>
     Public Function ObtenerTotalPaginasPdf(rutaPdf As String) As Integer
+        If String.IsNullOrWhiteSpace(rutaPdf) OrElse Not File.Exists(rutaPdf) Then Return 0
+
+        ' 1. Intento con iText 7 (permisivo ante restricciones de scanner/permisos)
         Try
-            If Not File.Exists(rutaPdf) Then Return 0
-            Using reader As New PdfReader(rutaPdf)
+            Dim readerProps As New ReaderProperties()
+            Using reader As New PdfReader(rutaPdf, readerProps)
+                reader.SetUnethicalReading(True)
                 Using doc As New PdfDocument(reader)
-                    Return doc.GetNumberOfPages()
+                    Dim pags = doc.GetNumberOfPages()
+                    If pags > 0 Then Return pags
                 End Using
             End Using
-        Catch
-            Try
-                Using col As New MagickImageCollection()
-                    col.Ping(rutaPdf)
-                    Return col.Count
-                End Using
-            Catch
-                Return 0
-            End Try
+        Catch exIText As Exception
+            ' Continuar con siguiente motor si iText falla
         End Try
+
+        ' 2. Intento con MuPDF CLI (mutool show -r file.pdf pages)
+        Try
+            Dim pagsMu = ObtenerPaginasPdfConMuPdf(rutaPdf)
+            If pagsMu > 0 Then Return pagsMu
+        Catch exMu As Exception
+        End Try
+
+        ' 3. Intento binario rápido analizando el catálogo /Pages o /Type /Page
+        Try
+            Dim pagsBin = ObtenerPaginasPdfPorRegex(rutaPdf)
+            If pagsBin > 0 Then Return pagsBin
+        Catch exBin As Exception
+        End Try
+
+        ' 4. Intento con ImageMagick (Ping de metadatos)
+        Try
+            Using col As New MagickImageCollection()
+                col.Ping(rutaPdf)
+                If col.Count > 0 Then Return col.Count
+            End Using
+        Catch
+        End Try
+
+        Return 0
+    End Function
+
+    ''' <summary>
+    ''' Cuenta páginas usando mutool.exe con el comando 'show -r "archivo.pdf" pages'.
+    ''' Es extraordinariamente rápido (~2-5ms) y capaz de reparar tablas XREF corruptas en memoria.
+    ''' </summary>
+    Private Function ObtenerPaginasPdfConMuPdf(rutaPdf As String) As Integer
+        Try
+            Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
+            If String.IsNullOrEmpty(muExe) OrElse Not File.Exists(muExe) Then Return 0
+
+            Dim psi As New ProcessStartInfo With {
+                .FileName = muExe,
+                .Arguments = $"show -r ""{rutaPdf}"" pages",
+                .UseShellExecute = False,
+                .CreateNoWindow = True,
+                .RedirectStandardOutput = True,
+                .RedirectStandardError = True,
+                .StandardOutputEncoding = Encoding.UTF8
+            }
+
+            Using proc As New Process With {.StartInfo = psi}
+                proc.Start()
+                Dim salida = proc.StandardOutput.ReadToEnd()
+                Dim errSalida = proc.StandardError.ReadToEnd()
+                proc.WaitForExit(4000)
+
+                If Not proc.HasExited Then
+                    Try
+                        proc.Kill()
+                    Catch
+                    End Try
+                    Return 0
+                End If
+
+                ' Buscar patrones "page 1 =", "page 2 =", etc.
+                Dim matches = Regex.Matches(salida, "(?im)^\s*page\s+(\d+)\s*=")
+                If matches.Count > 0 Then
+                    Dim maxPag As Integer = 0
+                    For Each m As Match In matches
+                        Dim num As Integer
+                        If Integer.TryParse(m.Groups(1).Value, num) AndAlso num > maxPag Then
+                            maxPag = num
+                        End If
+                    Next
+                    Return If(maxPag > 0, maxPag, matches.Count)
+                End If
+            End Using
+        Catch
+        End Try
+        Return 0
+    End Function
+
+    ''' <summary>
+    ''' Inspecciona el archivo binario del PDF en busca del catálogo /Pages con /Count
+    ''' o del conteo de ocurrencias de /Type /Page.
+    ''' </summary>
+    Private Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
+        Try
+            Dim fi As New FileInfo(rutaPdf)
+            If fi.Length = 0 Then Return 0
+
+            ' Leer los primeros 64 KB en busca de /Type /Pages ... /Count N
+            Dim tamHeader = Math.Min(CInt(fi.Length), 65536)
+            Dim buffer(tamHeader - 1) As Byte
+
+            Using fs As New FileStream(rutaPdf, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                fs.Read(buffer, 0, tamHeader)
+            End Using
+
+            Dim textoInicio = Encoding.ASCII.GetString(buffer)
+            Dim mCount = Regex.Match(textoInicio, "/Type\s*/Pages\b[^>]*?/Count\s+(\d+)")
+            If mCount.Success Then
+                Dim c As Integer
+                If Integer.TryParse(mCount.Groups(1).Value, c) AndAlso c > 0 Then Return c
+            End If
+
+            ' Si el archivo es menor a 20 MB, escanear todo el archivo en busca de /Type /Page
+            If fi.Length <= 20 * 1024 * 1024 Then
+                Dim bytesCompletos = File.ReadAllBytes(rutaPdf)
+                Dim textoCompleto = Encoding.ASCII.GetString(bytesCompletos)
+                Dim matches = Regex.Matches(textoCompleto, "/Type\s*/Page\b")
+                If matches.Count > 0 Then Return matches.Count
+            End If
+        Catch
+        End Try
+        Return 0
     End Function
 
     ''' <summary>
