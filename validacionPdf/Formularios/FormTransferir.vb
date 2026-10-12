@@ -374,6 +374,10 @@ Public Class FormTransferir
             bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino...")
         End If
 
+        ' Caché concurrente en RAM de subdirectorios existentes por cada carpeta padre en destino.
+        ' Evita saturar SMB realizando una sola consulta por carpeta padre en lugar de cientos de miles individuales.
+        Dim cacheDirectoriosDestino As New ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
+
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
         Dim contadorChequeados As Integer = 0
@@ -385,7 +389,7 @@ Public Class FormTransferir
                                        End If
 
                                        Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas) Then
+                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino) Then
                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                        Else
                                            bagPendientes.Add(archivoInfo)
@@ -745,9 +749,10 @@ Public Class FormTransferir
         destinoBase As String,
         archivoPdf As String,
         ByRef totalPaginas As Integer,
+        Optional cacheDirectoriosDestino As ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String))) = Nothing,
         Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
     ) As Boolean
-        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas, mapaBd)
+        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas, cacheDirectoriosDestino, mapaBd)
     End Function
 
     ''' <summary>
@@ -782,18 +787,12 @@ Public Class FormTransferir
     End Sub
 
     Private Function ObtenerRutaRelativa(basePath As String, fullPath As String) As String
-        Try
-            If Not basePath.EndsWith("\") Then
-                basePath &= "\"
-            End If
-            Dim uriBase As New Uri(basePath)
-            Dim uriFull As New Uri(fullPath)
-            Dim relativeUri As Uri = uriBase.MakeRelativeUri(uriFull)
-            Dim relativePath As String = Uri.UnescapeDataString(relativeUri.ToString())
-            Return relativePath.Replace("/"c, "\"c)
-        Catch ex As Exception
-            Return fullPath.Replace(basePath, "").TrimStart("\"c)
-        End Try
+        If String.IsNullOrEmpty(basePath) OrElse String.IsNullOrEmpty(fullPath) Then Return fullPath
+        Dim baseNorm = basePath.TrimEnd("\"c, "/"c) & "\"
+        If fullPath.StartsWith(baseNorm, StringComparison.OrdinalIgnoreCase) Then
+            Return fullPath.Substring(baseNorm.Length)
+        End If
+        Return Path.GetFileName(fullPath)
     End Function
 
     ''' <summary>
@@ -841,6 +840,9 @@ Public Class FormTransferir
     ''' </summary>
     Private Function NormalizarRutaRelativa(directorioRelativo As String) As String
         If String.IsNullOrWhiteSpace(directorioRelativo) Then Return ""
+        If directorioRelativo.IndexOf("ENTREGA", StringComparison.OrdinalIgnoreCase) < 0 Then
+            Return directorioRelativo
+        End If
 
         Dim partes = directorioRelativo.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.None)
         For i As Integer = 0 To partes.Length - 1

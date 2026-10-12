@@ -324,13 +324,14 @@ Public Module ModuloConversionJpg
 
     ''' <summary>
     ''' Comprueba rápidamente si un PDF ya fue convertido completamente en formato JPG.
-    ''' Realiza un conteo directo en destino y utiliza el mapa en memoria de la BD para máxima velocidad.
+    ''' Realiza un conteo directo en destino y utiliza la caché de directorios padre para máxima velocidad sobre SMB.
     ''' </summary>
     Public Function EstaPdfYaProcesadoYCompletoJpg(
         origenBase As String,
         destinoBase As String,
         archivoPdf As String,
         ByRef totalPaginas As Integer,
+        Optional cacheDirectoriosDestino As ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String))) = Nothing,
         Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
     ) As Boolean
         Try
@@ -340,8 +341,31 @@ Public Module ModuloConversionJpg
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
 
-            ' 1. Si la carpeta en disco no existe físicamente, descartar al instante sin abrir nada (0 ms)
-            If Not Directory.Exists(carpetaPdfDestino) Then Return False
+            ' 1. Verificación instantánea con caché en RAM del directorio padre (evita miles de llamadas SMB)
+            If cacheDirectoriosDestino IsNot Nothing Then
+                Dim lazySet = cacheDirectoriosDestino.GetOrAdd(destinoDirectorioFinal, Function(dirPadre)
+                    Return New Lazy(Of HashSet(Of String))(Function()
+                        Dim hs As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                        Try
+                            If Directory.Exists(dirPadre) Then
+                                For Each subDir In Directory.GetDirectories(dirPadre)
+                                    hs.Add(Path.GetFileName(subDir))
+                                Next
+                            End If
+                        Catch
+                        End Try
+                        Return hs
+                    End Function, LazyThreadSafetyMode.ExecutionAndPublication)
+                End Function)
+
+                ' Si la subcarpeta con el nombre del PDF no está en el HashSet del padre, descartar al instante (0 ms, 0 SMB)
+                If Not lazySet.Value.Contains(nombreSinExt) Then
+                    Return False
+                End If
+            Else
+                ' Si no se pasa caché, verificar en disco directamente
+                If Not Directory.Exists(carpetaPdfDestino) Then Return False
+            End If
 
             ' 2. Conteo de archivos JPG en la carpeta destino
             Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
@@ -668,18 +692,12 @@ Public Module ModuloConversionJpg
     ''' Obtiene la ruta relativa respecto a la base.
     ''' </summary>
     Public Function ObtenerRutaRelativa(basePath As String, fullPath As String) As String
-        Try
-            If Not basePath.EndsWith("\") Then
-                basePath &= "\"
-            End If
-            Dim uriBase As New Uri(basePath)
-            Dim uriFull As New Uri(fullPath)
-            Dim relativeUri As Uri = uriBase.MakeRelativeUri(uriFull)
-            Dim relativePath As String = Uri.UnescapeDataString(relativeUri.ToString())
-            Return relativePath.Replace("/"c, "\"c)
-        Catch ex As Exception
-            Return fullPath.Replace(basePath, "").TrimStart("\"c)
-        End Try
+        If String.IsNullOrEmpty(basePath) OrElse String.IsNullOrEmpty(fullPath) Then Return fullPath
+        Dim baseNorm = basePath.TrimEnd("\"c, "/"c) & "\"
+        If fullPath.StartsWith(baseNorm, StringComparison.OrdinalIgnoreCase) Then
+            Return fullPath.Substring(baseNorm.Length)
+        End If
+        Return Path.GetFileName(fullPath)
     End Function
 
     ''' <summary>
@@ -687,6 +705,9 @@ Public Module ModuloConversionJpg
     ''' </summary>
     Public Function NormalizarRutaRelativa(directorioRelativo As String) As String
         If String.IsNullOrWhiteSpace(directorioRelativo) Then Return ""
+        If directorioRelativo.IndexOf("ENTREGA", StringComparison.OrdinalIgnoreCase) < 0 Then
+            Return directorioRelativo
+        End If
         Dim partes = directorioRelativo.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.None)
         For i As Integer = 0 To partes.Length - 1
             Dim m = System.Text.RegularExpressions.Regex.Match(partes(i).Trim(), "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
