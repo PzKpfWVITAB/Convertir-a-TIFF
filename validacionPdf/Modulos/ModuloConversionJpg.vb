@@ -134,22 +134,28 @@ Public Module ModuloConversionJpg
 
             Using fs As New FileStream(rutaPdf, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
                 fs.Read(buffer, 0, tamHeader)
+
+                Dim textoInicio = Encoding.ASCII.GetString(buffer)
+                Dim mCount = Regex.Match(textoInicio, "/Type\s*/Pages\b[^>]*?/Count\s+(\d+)")
+                If mCount.Success Then
+                    Dim c As Integer
+                    If Integer.TryParse(mCount.Groups(1).Value, c) AndAlso c > 0 Then Return c
+                End If
+
+                ' Si no está en el encabezado, leer los últimos 64 KB (zona de tráiler y catálogo xref)
+                If fi.Length > tamHeader Then
+                    Dim tamTrailer = Math.Min(CInt(fi.Length), 65536)
+                    Dim bufferTrailer(tamTrailer - 1) As Byte
+                    fs.Seek(-tamTrailer, SeekOrigin.End)
+                    fs.Read(bufferTrailer, 0, tamTrailer)
+                    Dim textoTrailer = Encoding.ASCII.GetString(bufferTrailer)
+                    Dim mCountTrailer = Regex.Match(textoTrailer, "/Type\s*/Pages\b[^>]*?/Count\s+(\d+)")
+                    If mCountTrailer.Success Then
+                        Dim c As Integer
+                        If Integer.TryParse(mCountTrailer.Groups(1).Value, c) AndAlso c > 0 Then Return c
+                    End If
+                End If
             End Using
-
-            Dim textoInicio = Encoding.ASCII.GetString(buffer)
-            Dim mCount = Regex.Match(textoInicio, "/Type\s*/Pages\b[^>]*?/Count\s+(\d+)")
-            If mCount.Success Then
-                Dim c As Integer
-                If Integer.TryParse(mCount.Groups(1).Value, c) AndAlso c > 0 Then Return c
-            End If
-
-            ' Si el archivo es menor a 20 MB, escanear todo el archivo en busca de /Type /Page
-            If fi.Length <= 20 * 1024 * 1024 Then
-                Dim bytesCompletos = File.ReadAllBytes(rutaPdf)
-                Dim textoCompleto = Encoding.ASCII.GetString(bytesCompletos)
-                Dim matches = Regex.Matches(textoCompleto, "/Type\s*/Page\b")
-                If matches.Count > 0 Then Return matches.Count
-            End If
         Catch
         End Try
         Return 0
@@ -334,28 +340,32 @@ Public Module ModuloConversionJpg
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
 
-            ' 1. Si la carpeta no existe, descartar al instante (0 ms)
+            ' 1. Si se proporciona mapa de BD y el documento no está OK en la BD, descartar de inmediato en RAM (0 ms, 0 SMB)
+            Dim infoBd As InfoRegistroBd = Nothing
+            Dim tieneBdOk As Boolean = False
+            If mapaBd IsNot Nothing Then
+                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
+                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
+                        tieneBdOk = True
+                    End If
+                End If
+            End If
+
+            ' 2. Si la carpeta en disco no existe, descartar al instante
             If Not Directory.Exists(carpetaPdfDestino) Then Return False
 
-            ' 2. Conteo directo de archivos JPG en la carpeta destino
+            ' 3. Conteo de archivos JPG en la carpeta destino
             Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
             Dim conteoDestino = archivosJpg.Length
             If conteoDestino = 0 Then Return False
 
             Dim paginasEsperadas As Integer = 0
 
-            ' 3. Consultar la BD en RAM: si ya reporta estatus 'OK' y coincide con el conteo físico, validar cabeceras al vuelo
-            If mapaBd IsNot Nothing Then
-                Dim infoBd As InfoRegistroBd = Nothing
-                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas = conteoDestino Then
-                        paginasEsperadas = infoBd.Paginas
-                    End If
-                End If
-            End If
-
-            ' 4. Si no coincidió con la BD o no estaba en ella, consultar páginas del PDF
-            If paginasEsperadas <= 0 Then
+            ' 4. Si la BD lo tiene OK y coincide con el conteo físico, tenemos coincidencia directa sin abrir el PDF
+            If tieneBdOk AndAlso infoBd.Paginas = conteoDestino Then
+                paginasEsperadas = infoBd.Paginas
+            Else
+                ' Solo abrir el PDF si no está en la BD o si el conteo no cuadra con la BD
                 paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
             End If
 
