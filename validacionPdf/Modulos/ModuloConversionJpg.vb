@@ -340,45 +340,29 @@ Public Module ModuloConversionJpg
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
 
-            ' 1. Si se proporciona mapa de BD y el documento no está OK en la BD, descartar de inmediato en RAM (0 ms, 0 SMB)
-            Dim infoBd As InfoRegistroBd = Nothing
-            Dim tieneBdOk As Boolean = False
-            If mapaBd IsNot Nothing Then
-                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
-                        tieneBdOk = True
-                    End If
-                End If
-            End If
-
-            ' 2. Si la carpeta en disco no existe, descartar al instante
+            ' 1. Si la carpeta en disco no existe físicamente, descartar al instante sin abrir nada (0 ms)
             If Not Directory.Exists(carpetaPdfDestino) Then Return False
 
-            ' 3. Conteo de archivos JPG en la carpeta destino
+            ' 2. Conteo de archivos JPG en la carpeta destino
             Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
             Dim conteoDestino = archivosJpg.Length
             If conteoDestino = 0 Then Return False
 
-            Dim paginasEsperadas As Integer = 0
-
-            ' 4. Si la BD lo tiene OK y coincide con el conteo físico, tenemos coincidencia directa sin abrir el PDF
-            If tieneBdOk AndAlso infoBd.Paginas = conteoDestino Then
-                paginasEsperadas = infoBd.Paginas
-            Else
-                ' Solo abrir el PDF si no está en la BD o si el conteo no cuadra con la BD
-                paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
+            ' 3. Si se proporciona mapa de BD, verificar concordancia directa en RAM (0 ms)
+            Dim infoBd As InfoRegistroBd = Nothing
+            If mapaBd IsNot Nothing Then
+                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
+                    If infoBd.Encontrado AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas <> conteoDestino Then
+                        Return False
+                    End If
+                End If
             End If
 
-            ' 5. Si no se pudieron determinar páginas o el conteo físico en destino no coincide exactamente con el PDF
-            If paginasEsperadas <= 0 OrElse conteoDestino <> paginasEsperadas Then
-                Return False
-            End If
+            totalPaginas = conteoDestino
 
-            totalPaginas = paginasEsperadas
-
-            ' 6. Verificación rápida de cabeceras de página inicial y final (1 ms) para garantizar integridad
+            ' 4. Verificación ultrarrápida de integridad física (primera y última página con cabecera JPEG válida en ~1 ms)
             Dim dummyError As String = ""
-            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError)
+            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, conteoDestino, dummyError)
         Catch
             Return False
         End Try

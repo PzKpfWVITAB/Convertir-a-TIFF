@@ -371,16 +371,8 @@ Public Class FormTransferir
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
         ' =========================================================================
         If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino (cargando bitácora)...")
+            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino...")
         End If
-
-        ' Cargar diccionario de bitácora en RAM una sola vez para evitar accesos remotos repetitivos a MySQL/red
-        Dim mapaBdPrechequeo As Dictionary(Of String, InfoRegistroBd) = Nothing
-        Try
-            mapaBdPrechequeo = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
-        Catch
-            mapaBdPrechequeo = Nothing
-        End Try
 
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
@@ -393,7 +385,7 @@ Public Class FormTransferir
                                        End If
 
                                        Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, mapaBdPrechequeo) Then
+                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas) Then
                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                        Else
                                            bagPendientes.Add(archivoInfo)
