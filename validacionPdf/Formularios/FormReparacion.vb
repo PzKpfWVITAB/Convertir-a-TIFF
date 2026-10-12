@@ -1,4 +1,4 @@
-Imports System.Collections.Concurrent
+﻿Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Threading
@@ -160,7 +160,7 @@ Public Class FormReparacion
                                Dim bagItems As New ConcurrentBag(Of ItemDiagnostico)()
 
                                ' 3. Análisis masivo multinúcleo concurrente
-                               Dim numHilos = Math.Max(4, ModuloRecursos.ObtenerHilosOptimos())
+                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
                                Dim popt As New ParallelOptions With {
                                    .MaxDegreeOfParallelism = numHilos,
                                    .CancellationToken = token
