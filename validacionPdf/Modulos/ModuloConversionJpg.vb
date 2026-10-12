@@ -122,6 +122,85 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
+    ''' Validación ultrarrápida para diagnóstico en red: comprueba conteo exacto de archivos y verifica
+    ''' las cabeceras de la primera y última página en ~1ms, evitando cientos de llamadas SMB por documento.
+    ''' </summary>
+    Public Function ValidarIntegridadDiagnosticoRapidoJpg(
+        carpetaDestino As String,
+        nombreBase As String,
+        totalPaginasEsperadas As Integer,
+        ByRef mensajeError As String
+    ) As Boolean
+        Try
+            If Not Directory.Exists(carpetaDestino) Then
+                mensajeError = "La carpeta de destino no existe físicamente."
+                Return False
+            End If
+
+            If totalPaginasEsperadas <= 0 Then
+                mensajeError = "El número de páginas esperadas es 0 o inválido."
+                Return False
+            End If
+
+            Dim archivosJpg = Directory.GetFiles(carpetaDestino, "*.jpg")
+            If archivosJpg.Length <> totalPaginasEsperadas Then
+                mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosJpg.Length} imágenes JPG."
+                Return False
+            End If
+
+            ' Verificar página inicial (página 1)
+            Dim pagInicial = Path.Combine(carpetaDestino, $"{nombreBase}_1.jpg")
+            If Not File.Exists(pagInicial) Then
+                mensajeError = $"Falta la página inicial física: {nombreBase}_1.jpg"
+                Return False
+            End If
+
+            Dim fiIni As New FileInfo(pagInicial)
+            If fiIni.Length < 100 Then
+                mensajeError = $"La página inicial está vacía o incompleta ({fiIni.Length} bytes)."
+                Return False
+            End If
+
+            Using fs As New FileStream(pagInicial, FileMode.Open, FileAccess.Read, FileShare.Read)
+                Dim h(2) As Byte
+                If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
+                    mensajeError = "La página inicial no contiene una cabecera JPEG válida."
+                    Return False
+                End If
+            End Using
+
+            ' Si tiene más de una página, verificar la página final para confirmar que no se cortó la escritura
+            If totalPaginasEsperadas > 1 Then
+                Dim pagFinal = Path.Combine(carpetaDestino, $"{nombreBase}_{totalPaginasEsperadas}.jpg")
+                If Not File.Exists(pagFinal) Then
+                    mensajeError = $"Falta la página final física: {nombreBase}_{totalPaginasEsperadas}.jpg"
+                    Return False
+                End If
+
+                Dim fiFin As New FileInfo(pagFinal)
+                If fiFin.Length < 100 Then
+                    mensajeError = $"La página final está vacía o incompleta ({fiFin.Length} bytes)."
+                    Return False
+                End If
+
+                Using fs As New FileStream(pagFinal, FileMode.Open, FileAccess.Read, FileShare.Read)
+                    Dim h(2) As Byte
+                    If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
+                        mensajeError = "La página final no contiene una cabecera JPEG válida."
+                        Return False
+                    End If
+                End Using
+            End If
+
+            mensajeError = ""
+            Return True
+        Catch ex As Exception
+            mensajeError = "Error en validación rápida de diagnóstico: " & ex.Message
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Comprueba si un PDF ya fue convertido completamente al 100% en formato JPG a 200 DPI.
     ''' </summary>
     Public Function EstaPdfYaProcesadoYCompletoJpg(

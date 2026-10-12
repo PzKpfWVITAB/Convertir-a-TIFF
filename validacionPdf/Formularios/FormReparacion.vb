@@ -314,7 +314,12 @@ Public Class FormReparacion
             End If
 
             ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con iText 7
-            Dim pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+            Dim pagsEsperadas As Integer = 0
+            If infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
+                pagsEsperadas = infoBd.Paginas
+            Else
+                pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+            End If
             item.PagsEsperadas = pagsEsperadas
 
             If pagsEsperadas <= 0 Then
@@ -336,7 +341,7 @@ Public Class FormReparacion
 
             ' 5. Validación de integridad física estricta
             Dim errorIntegridad As String = ""
-            Dim validoFisicamente = ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestinoEsperada, nombreSinExt, pagsEsperadas, errorIntegridad)
+            Dim validoFisicamente = ModuloConversionJpg.ValidarIntegridadDiagnosticoRapidoJpg(carpetaDestinoEsperada, nombreSinExt, pagsEsperadas, errorIntegridad)
 
             If Not validoFisicamente Then
                 item.Estado = "⚠️ Incompleto (Daño)"
