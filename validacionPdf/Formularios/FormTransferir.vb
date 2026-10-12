@@ -371,8 +371,16 @@ Public Class FormTransferir
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
         ' =========================================================================
         If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino...")
+            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino (cargando bitácora)...")
         End If
+
+        ' Cargar diccionario de bitácora en RAM una sola vez para evitar accesos remotos repetitivos a MySQL/red
+        Dim mapaBdPrechequeo As Dictionary(Of String, InfoRegistroBd) = Nothing
+        Try
+            mapaBdPrechequeo = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+        Catch
+            mapaBdPrechequeo = Nothing
+        End Try
 
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
@@ -385,7 +393,7 @@ Public Class FormTransferir
                                        End If
 
                                        Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas) Then
+                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, mapaBdPrechequeo) Then
                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                        Else
                                            bagPendientes.Add(archivoInfo)
@@ -928,8 +936,14 @@ Public Class FormTransferir
     ''' 2. Comprueba que contenga archivos JPG.
     ''' 3. Ejecuta la validación física rápida de páginas y cabecera JPEG (sin páginas faltantes ni corruptas).
     ''' </summary>
-    Private Function EstaPdfYaProcesadoYCompleto(origenBase As String, destinoBase As String, archivoPdf As String, ByRef totalPaginas As Integer) As Boolean
-        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas)
+    Private Function EstaPdfYaProcesadoYCompleto(
+        origenBase As String,
+        destinoBase As String,
+        archivoPdf As String,
+        ByRef totalPaginas As Integer,
+        Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
+    ) As Boolean
+        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas, mapaBd)
     End Function
 
     ''' <summary>

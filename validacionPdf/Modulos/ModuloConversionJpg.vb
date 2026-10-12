@@ -317,13 +317,16 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
-    ''' Comprueba si un PDF ya fue convertido completamente al 100% en formato JPG a 200 DPI.
+    ''' Comprueba rápidamente si un PDF ya fue convertido completamente en formato JPG.
+    ''' Puede utilizar un diccionario en memoria de la base de datos (si se proporciona) para evitar
+    ''' abrir el PDF por red en absoluto. Realiza validación ultrarrápida de integridad física.
     ''' </summary>
     Public Function EstaPdfYaProcesadoYCompletoJpg(
         origenBase As String,
         destinoBase As String,
         archivoPdf As String,
-        ByRef totalPaginas As Integer
+        ByRef totalPaginas As Integer,
+        Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
     ) As Boolean
         Try
             Dim rutaRelativaArchivo = ObtenerRutaRelativa(origenBase, archivoPdf)
@@ -337,13 +340,30 @@ Public Module ModuloConversionJpg
             Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
             If archivosJpg.Length = 0 Then Return False
 
-            Dim paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
+            Dim paginasEsperadas As Integer = 0
+
+            ' 1. Si tenemos mapa en memoria de la BD y reporta estatus 'OK', usar sus páginas directamente sin abrir el PDF remoto
+            If mapaBd IsNot Nothing Then
+                Dim infoBd As InfoRegistroBd = Nothing
+                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
+                    If infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
+                        paginasEsperadas = infoBd.Paginas
+                    End If
+                End If
+            End If
+
+            ' 2. Si no se obtuvo de la BD, obtener páginas del PDF (solo si la carpeta destino tiene archivos)
+            If paginasEsperadas <= 0 Then
+                paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
+            End If
+
             If paginasEsperadas <= 0 Then Return False
 
             totalPaginas = paginasEsperadas
 
+            ' 3. Usar validación rápida de diagnóstico (comprueba conteo exacto y cabeceras JPG en 1ms, sin Magick ping masivo)
             Dim dummyError As String = ""
-            Return ValidarIntegridadFisicaJpg(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError)
+            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError)
         Catch
             Return False
         End Try
@@ -377,10 +397,6 @@ Public Module ModuloConversionJpg
 
         If Not File.Exists(pdfPath) Then
             Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
-        End If
-
-        If Not Directory.Exists(carpetaDestino) Then
-            Directory.CreateDirectory(carpetaDestino)
         End If
 
         Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
@@ -526,9 +542,10 @@ Public Module ModuloConversionJpg
                 Throw New IOException("MuPDF terminó pero no se generaron archivos JPG válidos en la etapa local.")
             End If
 
-            ' Asegurar la carpeta de destino en almacenamiento
+            ' Asegurar la carpeta de destino en almacenamiento de forma segura
             If Not Directory.Exists(carpetaDestino) Then
                 Directory.CreateDirectory(carpetaDestino)
+                Thread.Sleep(50)
             End If
 
             ' Transferir de forma segura con .NET administrado (inmune a fallos de codificación nativa en SMB)
@@ -539,14 +556,21 @@ Public Module ModuloConversionJpg
 
                 Dim copiado As Boolean = False
                 Dim ultimoEx As Exception = Nothing
-                For intento As Integer = 1 To 3
+                For intento As Integer = 1 To 4
                     Try
+                        If Not Directory.Exists(carpetaDestino) Then
+                            Directory.CreateDirectory(carpetaDestino)
+                        End If
                         File.Copy(jpgLoc, rutaDestinoFinal, True)
                         copiado = True
                         Exit For
                     Catch exCopy As Exception
                         ultimoEx = exCopy
-                        Thread.Sleep(100 * intento)
+                        Thread.Sleep(150 * intento)
+                        Try
+                            Directory.CreateDirectory(carpetaDestino)
+                        Catch
+                        End Try
                     End Try
                 Next
 
@@ -564,10 +588,10 @@ Public Module ModuloConversionJpg
             totalPaginas = jpgGenerados.Length
 
         Catch ex As OperationCanceledException
-            LimpiarCarpetaIncompleta(carpetaDestino)
+            VaciarArchivosDeCarpeta(carpetaDestino)
             Throw
         Catch ex As Exception
-            LimpiarCarpetaIncompleta(carpetaDestino)
+            VaciarArchivosDeCarpeta(carpetaDestino)
             Throw
         Finally
             Dim dummyProc As Process = Nothing
@@ -580,6 +604,25 @@ Public Module ModuloConversionJpg
                 End If
             Catch
             End Try
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Elimina únicamente los archivos JPG dentro de la carpeta destino sin destruir
+    ''' el objeto de directorio del sistema de archivos, previniendo colisiones de bloqueo SMB (DELETE_PENDING).
+    ''' </summary>
+    Public Sub VaciarArchivosDeCarpeta(carpetaDestino As String)
+        Try
+            If String.IsNullOrWhiteSpace(carpetaDestino) OrElse Not Directory.Exists(carpetaDestino) Then Exit Sub
+            Dim archivos = Directory.GetFiles(carpetaDestino, "*.jpg")
+            For Each f In archivos
+                Try
+                    File.Delete(f)
+                Catch
+                End Try
+            Next
+        Catch ex As Exception
+            Debug.WriteLine("Error al vaciar archivos de carpeta: " & ex.Message)
         End Try
     End Sub
 

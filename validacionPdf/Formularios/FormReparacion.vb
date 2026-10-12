@@ -506,8 +506,8 @@ Public Class FormReparacion
                                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(item.Documento)
                                    Dim carpetaDestino = item.CarpetaDestino
 
-                                   ' 1. Borrar carpeta incompleta si existe para iniciar limpio
-                                   ModuloConversionJpg.LimpiarCarpetaIncompleta(carpetaDestino)
+                                   ' 1. Vaciar archivos incompletos previos si la carpeta ya existía
+                                   ModuloConversionJpg.VaciarArchivosDeCarpeta(carpetaDestino)
 
                                    ' 2. Procesar y convertir a JPG 200 DPI
                                    Dim totalPags As Integer = 0
@@ -532,11 +532,11 @@ Public Class FormReparacion
                                            exito = True
                                        Else
                                            exito = False
-                                           ModuloConversionJpg.LimpiarCarpetaIncompleta(carpetaDestino)
+                                           ModuloConversionJpg.VaciarArchivosDeCarpeta(carpetaDestino)
                                        End If
 
                                    Catch exOp As OperationCanceledException
-                                       ModuloConversionJpg.LimpiarCarpetaIncompleta(carpetaDestino)
+                                       ModuloConversionJpg.VaciarArchivosDeCarpeta(carpetaDestino)
                                        Exit Sub
                                    Catch exGen As Exception
                                        exito = False
@@ -548,7 +548,7 @@ Public Class FormReparacion
                                            errDetalle &= " | " & exGen.InnerException.Message
                                        End If
                                        msgError = errDetalle
-                                       ModuloConversionJpg.LimpiarCarpetaIncompleta(carpetaDestino)
+                                       ModuloConversionJpg.VaciarArchivosDeCarpeta(carpetaDestino)
                                    End Try
 
                                    ' 4. Registro en BD si fue exitoso
