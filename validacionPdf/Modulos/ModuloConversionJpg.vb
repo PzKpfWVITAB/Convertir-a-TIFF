@@ -431,14 +431,15 @@ Public Module ModuloConversionJpg
                             paginasEncontradas.Add(numPag)
                         End SyncLock
 
-                        Dim jpgDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.jpg")
+                        ' Codificar directamente en el staging LOCAL para máxima velocidad y evitar errores SMB de ImageMagick
+                        Dim jpgLocal = Path.Combine(stagingCarpeta, $"{nombreBase}_{numPag}.jpg")
 
                         Using img As New MagickImage(pngFile)
                             img.Format = MagickFormat.Jpeg
                             img.Quality = CALIDAD_JPG
                             img.Density = New Density(RESOLUCION_DPI, RESOLUCION_DPI)
                             img.Alpha(AlphaOption.Remove)
-                            img.Write(jpgDestino)
+                            img.Write(jpgLocal)
                         End Using
 
                         ' Eliminar temporal al vuelo para no saturar disco
@@ -519,10 +520,45 @@ Public Module ModuloConversionJpg
                 Parallel.ForEach(ultimosPng, popt, codificarPngAJpg)
             End If
 
-            ' Validar archivos JPG generados
+            ' Recoger todos los JPGs generados localmente en staging
+            Dim jpgsLocales = Directory.GetFiles(stagingCarpeta, $"{nombreBase}_*.jpg")
+            If jpgsLocales.Length = 0 Then
+                Throw New IOException("MuPDF terminó pero no se generaron archivos JPG válidos en la etapa local.")
+            End If
+
+            ' Asegurar la carpeta de destino en almacenamiento
+            If Not Directory.Exists(carpetaDestino) Then
+                Directory.CreateDirectory(carpetaDestino)
+            End If
+
+            ' Transferir de forma segura con .NET administrado (inmune a fallos de codificación nativa en SMB)
+            For Each jpgLoc In jpgsLocales
+                If token.IsCancellationRequested Then Throw New OperationCanceledException()
+                Dim nomArchivo = Path.GetFileName(jpgLoc)
+                Dim rutaDestinoFinal = Path.Combine(carpetaDestino, nomArchivo)
+
+                Dim copiado As Boolean = False
+                Dim ultimoEx As Exception = Nothing
+                For intento As Integer = 1 To 3
+                    Try
+                        File.Copy(jpgLoc, rutaDestinoFinal, True)
+                        copiado = True
+                        Exit For
+                    Catch exCopy As Exception
+                        ultimoEx = exCopy
+                        Thread.Sleep(100 * intento)
+                    End Try
+                Next
+
+                If Not copiado AndAlso ultimoEx IsNot Nothing Then
+                    Throw New IOException($"Error al transferir '{nomArchivo}' a destino: {ultimoEx.Message}", ultimoEx)
+                End If
+            Next
+
+            ' Validar archivos JPG generados en destino
             Dim jpgGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.jpg")
             If jpgGenerados.Length = 0 Then
-                Throw New IOException("MuPDF terminó pero no se generaron archivos JPG válidos en destino.")
+                Throw New IOException("No se encontraron archivos JPG en la carpeta destino final.")
             End If
 
             totalPaginas = jpgGenerados.Length

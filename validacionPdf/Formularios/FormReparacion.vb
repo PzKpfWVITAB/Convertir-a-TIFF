@@ -490,8 +490,8 @@ Public Class FormReparacion
 
         progressBar1.Value = 0
 
-        Dim maxHilos = Math.Max(2, Math.Min(Environment.ProcessorCount, ModuloRecursos.ObtenerHilosOptimos()))
-        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos.")
+        Dim maxHilos = Math.Max(2, Math.Min(Environment.ProcessorCount, ModuloRecursos.ObtenerHilosRedOptimos()))
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (red controlada).")
 
         Try
             Await Task.Run(Sub()
@@ -540,7 +540,14 @@ Public Class FormReparacion
                                        Exit Sub
                                    Catch exGen As Exception
                                        exito = False
-                                       msgError = exGen.Message
+                                       Dim errDetalle As String = exGen.Message
+                                       If TypeOf exGen Is AggregateException Then
+                                           Dim agg = DirectCast(exGen, AggregateException).Flatten()
+                                           errDetalle = String.Join(" | ", agg.InnerExceptions.Select(Function(ie) ie.Message))
+                                       ElseIf exGen.InnerException IsNot Nothing Then
+                                           errDetalle &= " | " & exGen.InnerException.Message
+                                       End If
+                                       msgError = errDetalle
                                        ModuloConversionJpg.LimpiarCarpetaIncompleta(carpetaDestino)
                                    End Try
 
@@ -759,32 +766,22 @@ Public Class FormReparacion
             Dim nombresArchivos = {"depuracion_reparador.txt", "depuracion_reparador.log"}
 
             Dim carpetasDestino As New List(Of String)()
-
-            Try
-                If Not String.IsNullOrEmpty(Application.StartupPath) AndAlso Directory.Exists(Application.StartupPath) Then
-                    carpetasDestino.Add(Application.StartupPath)
-                End If
-            Catch
-            End Try
-
-            Try
-                If Not String.IsNullOrEmpty(AppDomain.CurrentDomain.BaseDirectory) AndAlso Directory.Exists(AppDomain.CurrentDomain.BaseDirectory) Then
-                    If Not carpetasDestino.Contains(AppDomain.CurrentDomain.BaseDirectory) Then
-                        carpetasDestino.Add(AppDomain.CurrentDomain.BaseDirectory)
+            Dim agregarCarpeta = Sub(ruta As String)
+                If String.IsNullOrWhiteSpace(ruta) Then Exit Sub
+                Try
+                    If Directory.Exists(ruta) Then
+                        Dim normalizada = Path.GetFullPath(ruta).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                        If Not carpetasDestino.Any(Function(c) c.Equals(normalizada, StringComparison.OrdinalIgnoreCase)) Then
+                            carpetasDestino.Add(normalizada)
+                        End If
                     End If
-                End If
-            Catch
-            End Try
+                Catch
+                End Try
+            End Sub
 
-            Try
-                Dim tempDir = Path.GetTempPath()
-                If Not String.IsNullOrEmpty(tempDir) AndAlso Directory.Exists(tempDir) Then
-                    If Not carpetasDestino.Contains(tempDir) Then
-                        carpetasDestino.Add(tempDir)
-                    End If
-                End If
-            Catch
-            End Try
+            agregarCarpeta(Application.StartupPath)
+            agregarCarpeta(AppDomain.CurrentDomain.BaseDirectory)
+            agregarCarpeta(Path.GetTempPath())
 
             SyncLock _lockLogReparador
                 For Each carpeta In carpetasDestino
