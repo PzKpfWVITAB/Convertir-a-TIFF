@@ -464,7 +464,7 @@ Public Class FormTransferir
         ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
         ' =========================================================================
         If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            Dim hilosGrandes = Math.Max(4, Math.Min(24, CInt(Math.Floor(Environment.ProcessorCount * 0.38))))
+            Dim hilosGrandes = Math.Max(1, Math.Min(3, CInt(Math.Floor(Environment.ProcessorCount * 0.2))))
             Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ hilosGrandes))
 
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
@@ -669,7 +669,6 @@ Public Class FormTransferir
                 estatusFinal = "CANCELADO"
                 Return "CANCELADO"
             End If
-            estatusFinal = "ERROR"
             Dim detalleError As String = ex.Message
             If TypeOf ex Is AggregateException Then
                 Dim agg = DirectCast(ex, AggregateException).Flatten()
@@ -677,6 +676,7 @@ Public Class FormTransferir
             ElseIf ex.InnerException IsNot Nothing Then
                 detalleError &= " -> " & ex.InnerException.GetType().Name & ": " & ex.InnerException.Message
             End If
+            estatusFinal = "ERROR: " & detalleError
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | ERROR | {nombreSinExt} | {detalleError}")
         Finally
             Dim dummy As String = Nothing
@@ -717,217 +717,29 @@ Public Class FormTransferir
         Optional procesarPaginasEnParalelo As Boolean = False,
         Optional hilosParalelos As Integer = 1
     )
-        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
-
-        Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
-        If String.IsNullOrEmpty(muExe) OrElse Not File.Exists(muExe) Then
-            Throw New FileNotFoundException("No se encontró el ejecutable de MuPDF (mutool.exe) en el sistema.")
-        End If
-
-        If Not File.Exists(pdfPath) Then
-            Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
-        End If
-
-        ' Asegurar carpeta destino físicamente en almacenamiento
-        SyncLock locker
-            If Not Directory.Exists(carpetaDestino) Then
-                Directory.CreateDirectory(carpetaDestino)
-            End If
-        End SyncLock
-
-        Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
-        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "mu_" & Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(stagingCarpeta)
-
-        Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
+        Dim callbackProgreso As Action(Of Integer, String) = Nothing
         Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
-        Dim procId As Integer = 0
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            callbackProgreso = Sub(pct, texto)
+                                   bgWorker.ReportProgress(pct, $"STATUS|{texto} ({pesoMB:0.1} MB)")
+                               End Sub
+        End If
 
-        Try
-            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
-
-            ' Patrón de imagen temporal de mutool draw: p_1.png, p_2.png...
-            Dim patronSalidaPng = Path.Combine(stagingCarpeta, "p_%d.png")
-
-            Dim args As New StringBuilder()
-            args.Append("draw ")
-            args.Append("-q ")
-            args.Append("-P ")
-            args.Append($"-r {ModuloConversionJpg.RESOLUCION_DPI} ")
-            args.Append("-c rgb ")
-            args.Append($"-o ""{patronSalidaPng}"" ")
-            args.Append($"""{pdfPath}""")
-
-            Dim psi As New ProcessStartInfo With {
-                .FileName = muExe,
-                .Arguments = args.ToString(),
-                .UseShellExecute = False,
-                .CreateNoWindow = True,
-                .RedirectStandardError = True,
-                .RedirectStandardOutput = False
-            }
-
-            Dim paginasCodificadas As Integer = 0
-            Dim paginasEncontradas As New HashSet(Of Integer)()
-            Dim lockerPaginas As New Object()
-
-            Dim codificarPngAJpg = Sub(pngFile As String)
-                If token.IsCancellationRequested OrElse canceladoPorUsuario Then Exit Sub
-
-                Dim nomSinExt = Path.GetFileNameWithoutExtension(pngFile)
-                Dim partes = nomSinExt.Split("_"c)
-                If partes.Length >= 2 Then
-                    Dim numPag As Integer = 0
-                    If Integer.TryParse(partes(1), numPag) Then
-                        SyncLock lockerPaginas
-                            If paginasEncontradas.Contains(numPag) Then Exit Sub
-                            paginasEncontradas.Add(numPag)
-                        End SyncLock
-
-                        Dim jpgDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.jpg")
-
-                        Using img As New MagickImage(pngFile)
-                            img.Format = MagickFormat.Jpeg
-                            img.Quality = ModuloConversionJpg.CALIDAD_JPG
-                            img.Density = New Density(ModuloConversionJpg.RESOLUCION_DPI, ModuloConversionJpg.RESOLUCION_DPI)
-                            img.Alpha(AlphaOption.Remove)
-                            img.Write(jpgDestino)
-                        End Using
-
-                        ' BORRADO INMEDIATO DE LA IMAGEN TEMPORAL PARA CUIDAR EL DISCO
-                        Try
-                            File.Delete(pngFile)
-                        Catch
-                        End Try
-
-                        Dim compl = Interlocked.Increment(paginasCodificadas)
-                        If (compl Mod 10 = 0 OrElse compl = paginasEsperadas) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                            Dim pct = If(paginasEsperadas > 0, CInt(Math.Min(100, (compl / CDbl(paginasEsperadas)) * 100)), 50)
-                            Dim totalStr = If(paginasEsperadas > 0, paginasEsperadas.ToString("#,##0"), "?")
-                            bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {compl:#,##0}/{totalStr} págs JPG (200 DPI)")
-                        End If
-                    End If
-                End If
-            End Sub
-
-            Using proc As New Process()
-                proc.StartInfo = psi
-                Dim stderrOutput As New StringBuilder()
-
-                AddHandler proc.ErrorDataReceived, Sub(s, e)
-                    If Not String.IsNullOrEmpty(e.Data) Then
-                        stderrOutput.AppendLine(e.Data)
-                    End If
-                End Sub
-
-                proc.Start()
-                procId = proc.Id
-                ProcesosActivos.TryAdd(procId, proc)
-                proc.BeginErrorReadLine()
-
-                ' Soporte de cancelación inmediata
-                Using reg = token.Register(Sub()
-                    Try
-                        If Not proc.HasExited Then proc.Kill()
-                    Catch
-                    End Try
-                End Sub)
-
-                    ' Bucle de consumo concurrente en tiempo real mientras mutool renderiza en paralelo
-                    While Not proc.WaitForExit(75)
-                        If token.IsCancellationRequested OrElse canceladoPorUsuario Then
-                            Try
-                                If Not proc.HasExited Then proc.Kill()
-                            Catch
-                            End Try
-                            Throw New OperationCanceledException()
-                        End If
-
-                        ' Buscar PNGs listos generados por mutool y codificarlos a JPG en paralelo
-                        Try
-                            Dim archivosPng = Directory.GetFiles(stagingCarpeta, "p_*.png")
-                            If archivosPng.Length > 0 Then
-                                Dim listos = archivosPng.Where(AddressOf EsArchivoListoParaLectura).ToList()
-                                If listos.Count > 0 Then
-                                    Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
-                                    Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                                    Parallel.ForEach(listos, popt, codificarPngAJpg)
-                                End If
-                            End If
-                        Catch
-                        End Try
-                    End While
-
-                End Using
-
-                If token.IsCancellationRequested OrElse canceladoPorUsuario Then
-                    Throw New OperationCanceledException()
-                End If
-
-                If proc.ExitCode <> 0 Then
-                    Dim errStr = stderrOutput.ToString().Trim()
-                    Throw New IOException($"MuPDF finalizó con código de salida {proc.ExitCode}: {errStr}")
-                End If
-            End Using
-
-            ' Barrido final para procesar los últimos PNGs que mutool generó justo antes de terminar
-            Dim ultimosPng = Directory.GetFiles(stagingCarpeta, "p_*.png")
-            If ultimosPng.Length > 0 Then
-                Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
-                Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                Parallel.ForEach(ultimosPng, popt, codificarPngAJpg)
-            End If
-
-            ' Validar archivos JPG finales directamente en la carpeta destino
-            Dim jpgGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.jpg")
-            If jpgGenerados.Length = 0 Then
-                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos JPG válidos en destino.")
-            End If
-
-            totalPaginas = jpgGenerados.Length
-
-        Catch ex As OperationCanceledException
-            LimpiarCarpetaIncompleta(carpetaDestino)
-            Throw
-        Catch ex As Exception
-            LimpiarCarpetaIncompleta(carpetaDestino)
-            Throw
-        Finally
-            Dim dummyProc As Process = Nothing
-            Try
-                If procId > 0 Then ProcesosActivos.TryRemove(procId, dummyProc)
-            Catch
-            End Try
-            Try
-                If Directory.Exists(stagingCarpeta) Then
-                    Directory.Delete(stagingCarpeta, True)
-                End If
-            Catch
-            End Try
-        End Try
+        ModuloConversionJpg.ConvertirPdfJpgMuPdf(
+            pdfPath,
+            carpetaDestino,
+            nombreBase,
+            totalPaginas,
+            token,
+            procesarPaginasEnParalelo,
+            hilosParalelos,
+            callbackProgreso,
+            ProcesosActivos
+        )
     End Sub
 
-    ''' <summary>
-    ''' Obtiene rápidamente el número total de páginas de un PDF sin descomprimirlo en RAM.
-    ''' Utiliza iText 7 como método principal (lectura de trailer/catálogo en ~0.5ms) con fallback a ImageMagick Ping.
-    ''' </summary>
     Private Function ObtenerTotalPaginasPdf(rutaPdf As String) As Integer
-        Try
-            Using reader As New PdfReader(rutaPdf)
-                Using doc As New PdfDocument(reader)
-                    Return doc.GetNumberOfPages()
-                End Using
-            End Using
-        Catch
-            Try
-                Using col As New MagickImageCollection()
-                    col.Ping(rutaPdf)
-                    Return col.Count
-                End Using
-            Catch
-                Return 0
-            End Try
-        End Try
+        Return ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
     End Function
 
     ''' <summary>
@@ -956,7 +768,7 @@ Public Class FormTransferir
     ''' 6. Que la imagen sea completamente legible (validación rápida de metadatos MagickImageInfo).
     ''' </summary>
     Private Function ValidarIntegridadFisicaTiff(carpetaDestino As String, nombreBase As String, totalPaginasEsperadas As Integer, ByRef mensajeError As String) As Boolean
-        Return ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestino, nombreBase, totalPaginasEsperadas, mensajeError)
+        Return ModuloConversionJpg.ValidarIntegridadDiagnosticoRapidoJpg(carpetaDestino, nombreBase, totalPaginasEsperadas, mensajeError)
     End Function
 
     Private Sub LimpiarCarpetaIncompleta(carpeta As String)
@@ -1070,7 +882,7 @@ Public Class FormTransferir
 
     Private Sub EscribirLog(mensaje As String)
         Try
-            Dim rutaLog As String = "C:\LogsTIFF"
+            Dim rutaLog As String = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StellumLogs")
             If Not Directory.Exists(rutaLog) Then
                 Directory.CreateDirectory(rutaLog)
             End If

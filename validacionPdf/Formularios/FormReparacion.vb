@@ -1,4 +1,4 @@
-Imports System.Collections.Concurrent
+﻿Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Text
@@ -528,7 +528,7 @@ Public Class FormReparacion
                                         )
 
                                        ' 3. Validación física de integridad
-                                       If ModuloConversionJpg.ValidarIntegridadFisicaJpg(carpetaDestino, nombreSinExt, totalPags, msgError) Then
+                                       If ModuloConversionJpg.ValidarIntegridadDiagnosticoRapidoJpg(carpetaDestino, nombreSinExt, totalPags, msgError) Then
                                            exito = True
                                        Else
                                            exito = False

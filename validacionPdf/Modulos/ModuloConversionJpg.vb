@@ -564,7 +564,9 @@ Public Module ModuloConversionJpg
             End If
 
             ' Transferir de forma segura con .NET administrado (inmune a fallos de codificación nativa en SMB)
-            For Each jpgLoc In jpgsLocales
+            Dim numHilosCopia = Math.Max(2, Math.Min(6, Environment.ProcessorCount \ 2))
+            Dim poptCopia As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosCopia, .CancellationToken = token}
+            Parallel.ForEach(jpgsLocales, poptCopia, Sub(jpgLoc)
                 If token.IsCancellationRequested Then Throw New OperationCanceledException()
                 Dim nomArchivo = Path.GetFileName(jpgLoc)
                 Dim rutaDestinoFinal = Path.Combine(carpetaDestino, nomArchivo)
@@ -574,7 +576,9 @@ Public Module ModuloConversionJpg
                 For intento As Integer = 1 To 4
                     Try
                         If Not Directory.Exists(carpetaDestino) Then
-                            Directory.CreateDirectory(carpetaDestino)
+                            SyncLock lockerPaginas
+                                If Not Directory.Exists(carpetaDestino) Then Directory.CreateDirectory(carpetaDestino)
+                            End SyncLock
                         End If
                         File.Copy(jpgLoc, rutaDestinoFinal, True)
                         copiado = True
@@ -592,7 +596,7 @@ Public Module ModuloConversionJpg
                 If Not copiado AndAlso ultimoEx IsNot Nothing Then
                     Throw New IOException($"Error al transferir '{nomArchivo}' a destino: {ultimoEx.Message}", ultimoEx)
                 End If
-            Next
+            End Sub)
 
             ' Validar archivos JPG generados en destino
             Dim jpgGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.jpg")
