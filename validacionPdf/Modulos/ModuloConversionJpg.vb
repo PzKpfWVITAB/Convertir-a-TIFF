@@ -332,6 +332,7 @@ Public Module ModuloConversionJpg
         archivoPdf As String,
         ByRef totalPaginas As Integer,
         Optional cacheDirectoriosDestino As ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String))) = Nothing,
+        Optional mapaIndice As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing,
         Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
     ) As Boolean
         Try
@@ -372,21 +373,37 @@ Public Module ModuloConversionJpg
             Dim conteoDestino = archivosJpg.Length
             If conteoDestino = 0 Then Return False
 
-            ' 3. Si se proporciona mapa de BD, verificar concordancia directa en RAM (0 ms)
-            Dim infoBd As InfoRegistroBd = Nothing
-            If mapaBd IsNot Nothing Then
-                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas <> conteoDestino Then
-                        Return False
+            ' 3. Determinar páginas esperadas desde el índice de origen en memoria
+            Dim paginasEsperadas As Integer = 0
+            If mapaIndice IsNot Nothing Then
+                Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
+                If mapaIndice.TryGetValue(archivoPdf, infoIndice) Then
+                    If infoIndice.Paginas > 0 Then
+                        paginasEsperadas = infoIndice.Paginas
                     End If
                 End If
             End If
 
-            totalPaginas = conteoDestino
+            ' Si no estaba en el índice pero se proporciona mapa de BD
+            If paginasEsperadas <= 0 AndAlso mapaBd IsNot Nothing Then
+                Dim infoBd As InfoRegistroBd = Nothing
+                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
+                    If infoBd.Encontrado AndAlso infoBd.Paginas > 0 Then
+                        paginasEsperadas = infoBd.Paginas
+                    End If
+                End If
+            End If
+
+            ' Si se conocen las páginas esperadas y no coinciden con las imágenes físicas generadas, no está completo
+            If paginasEsperadas > 0 AndAlso conteoDestino <> paginasEsperadas Then
+                Return False
+            End If
+
+            totalPaginas = If(paginasEsperadas > 0, paginasEsperadas, conteoDestino)
 
             ' 4. Verificación ultrarrápida de integridad física (primera y última página con cabecera JPEG válida en ~1 ms)
             Dim dummyError As String = ""
-            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, conteoDestino, dummyError)
+            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, totalPaginas, dummyError)
         Catch
             Return False
         End Try

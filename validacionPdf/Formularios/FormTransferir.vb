@@ -194,6 +194,7 @@ Public Class FormTransferir
         rutaOrigenActual = ListBoxOrigen.SelectedItem.ToString()
         LabelOrigenRuta.Text = rutaOrigenActual
         CargarCarpetas(rutaOrigenActual, ListViewOrigen)
+        ActualizarResumenIndiceEnUi(rutaOrigenActual)
     End Sub
 
     Private Sub ListBoxDestino_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ListBoxDestino.SelectedIndexChanged
@@ -215,6 +216,131 @@ Public Class FormTransferir
         End If
         LabelOrigenRuta.Text = rutaOrigenActual
         CargarCarpetas(rutaOrigenActual, ListViewOrigen)
+        ActualizarResumenIndiceEnUi(rutaOrigenActual)
+    End Sub
+
+    Private cancelSourceIndexar As CancellationTokenSource = Nothing
+    Private estaIndexando As Boolean = False
+
+    Private Sub ActualizarResumenIndiceEnUi(ruta As String)
+        If String.IsNullOrWhiteSpace(ruta) Then
+            lblResumenIndice.Text = "Índice: Seleccione un origen"
+            lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+            Exit Sub
+        End If
+
+        lblResumenIndice.Text = "Índice: Consultando..."
+        lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+
+        Task.Run(Sub()
+                     Dim resumen = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+                     Me.BeginInvoke(Sub()
+                                        If rutaOrigenActual = ruta Then
+                                            lblResumenIndice.Text = resumen.ToString()
+                                            If resumen.Existe Then
+                                                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                                            Else
+                                                lblResumenIndice.ForeColor = Color.FromArgb(160, 90, 20)
+                                            End If
+                                        End If
+                                    End Sub)
+                 End Sub)
+    End Sub
+
+    Private Async Sub btnIndexarOrigen_Click(sender As Object, e As EventArgs) Handles btnIndexarOrigen.Click
+        If estaIndexando Then
+            If cancelSourceIndexar IsNot Nothing Then
+                Dim resp = MessageBox.Show("¿Desea cancelar el proceso de indexación en curso?", "Cancelar Indexado", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                If resp = DialogResult.Yes Then
+                    cancelSourceIndexar.Cancel()
+                    btnIndexarOrigen.Text = "Cancelando..."
+                    btnIndexarOrigen.Enabled = False
+                End If
+            End If
+            Exit Sub
+        End If
+
+        Dim ruta = rutaOrigenActual
+        If String.IsNullOrWhiteSpace(ruta) OrElse Not Directory.Exists(ruta) Then
+            MessageBox.Show("Seleccione una carpeta de origen válida antes de indexar.", "Origen no seleccionado", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Exit Sub
+        End If
+
+        Dim resumenActual = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+        Dim msgPregunta = $"Se creará/reconstruirá el índice de PDFs de origen en la base de datos para la ruta:{vbCrLf}{vbCrLf}" &
+                          $"{ruta}{vbCrLf}{vbCrLf}"
+        If resumenActual.Existe Then
+            msgPregunta &= $"Actualmente hay {resumenActual.TotalPdfs:#,##0} PDFs y {resumenActual.TotalPaginas:#,##0} páginas indexadas en esta ubicación.{vbCrLf}" &
+                           "Al continuar, se eliminará el índice anterior de esta ruta y se reindexará desde cero con los archivos actuales.{vbCrLf}{vbCrLf}"
+        Else
+            msgPregunta &= "Esta ubicación no tiene índice registrado todavía.{vbCrLf}{vbCrLf}"
+        End If
+        msgPregunta &= "¿Desea iniciar la indexación ahora?"
+
+        If MessageBox.Show(msgPregunta, "Confirmar Indexado de Origen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) <> DialogResult.Yes Then
+            Exit Sub
+        End If
+
+        estaIndexando = True
+        btnIndexarOrigen.Text = "⏹ Cancelar Indexado"
+        btnTransferir.Enabled = False
+        cancelSourceIndexar = New CancellationTokenSource()
+        Dim token = cancelSourceIndexar.Token
+
+        Dim hilos = ModuloRecursos.ObtenerHilosOptimos()
+        Try
+            Dim resumenFinal As ModuloIndiceOrigen.ResumenIndice = Nothing
+            Await Task.Run(Function()
+                               Return ModuloIndiceOrigen.ReindexarDirectorio(
+                                   ruta,
+                                   hilos,
+                                   token,
+                                   Sub(proc, tot, fase)
+                                       Me.BeginInvoke(Sub()
+                                                          If tot > 0 Then
+                                                              lblResumenIndice.Text = $"{fase} {proc:#,##0}/{tot:#,##0}"
+                                                          Else
+                                                              lblResumenIndice.Text = fase
+                                                          End If
+                                                      End Sub)
+                                   End Sub
+                               )
+                           End Function, token).ContinueWith(Sub(t)
+                                                                 If t.IsFaulted Then
+                                                                     Throw t.Exception.InnerException
+                                                                 ElseIf Not t.IsCanceled Then
+                                                                     resumenFinal = t.Result
+                                                                 End If
+                                                             End Sub)
+
+            If resumenFinal IsNot Nothing Then
+                lblResumenIndice.Text = resumenFinal.ToString()
+                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                MessageBox.Show($"Indexación completada exitosamente:{vbCrLf}{vbCrLf}" &
+                                $"• Total PDFs indexados: {resumenFinal.TotalPdfs:#,##0}{vbCrLf}" &
+                                $"• Total páginas registradas: {resumenFinal.TotalPaginas:#,##0}{vbCrLf}" &
+                                $"• PDFs sin leer/corruptos: {resumenFinal.TotalSinLeer:#,##0}",
+                                "Índice Actualizado", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            End If
+
+        Catch ex As OperationCanceledException
+            lblResumenIndice.Text = "Indexación cancelada por el usuario."
+            lblResumenIndice.ForeColor = Color.FromArgb(160, 40, 40)
+        Catch ex As Exception
+            lblResumenIndice.Text = "Error en indexación: " & ex.Message
+            lblResumenIndice.ForeColor = Color.FromArgb(180, 20, 20)
+            MessageBox.Show("Error durante la indexación: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        Finally
+            estaIndexando = False
+            btnIndexarOrigen.Text = "📑 Indexar Origen"
+            btnIndexarOrigen.Enabled = True
+            btnTransferir.Enabled = True
+            If cancelSourceIndexar IsNot Nothing Then
+                cancelSourceIndexar.Dispose()
+                cancelSourceIndexar = Nothing
+            End If
+            ActualizarResumenIndiceEnUi(rutaOrigenActual)
+        End Try
     End Sub
 
     Private Sub ListViewDestino_DoubleClick(sender As Object, e As EventArgs) Handles ListViewDestino.DoubleClick
@@ -378,6 +504,14 @@ Public Class FormTransferir
         ' Evita saturar SMB realizando una sola consulta por carpeta padre en lugar de cientos de miles individuales.
         Dim cacheDirectoriosDestino As New ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
 
+        ' Cargar en memoria el índice permanente de origen (si existe) para esta carpeta específica
+        Dim mapaIndiceOrigen As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing
+        Try
+            mapaIndiceOrigen = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
+        Catch
+            mapaIndiceOrigen = Nothing
+        End Try
+
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
         Dim contadorChequeados As Integer = 0
@@ -389,7 +523,7 @@ Public Class FormTransferir
                                        End If
 
                                        Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino) Then
+                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen) Then
                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                        Else
                                            bagPendientes.Add(archivoInfo)
@@ -750,9 +884,10 @@ Public Class FormTransferir
         archivoPdf As String,
         ByRef totalPaginas As Integer,
         Optional cacheDirectoriosDestino As ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String))) = Nothing,
+        Optional mapaIndice As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing,
         Optional mapaBd As Dictionary(Of String, InfoRegistroBd) = Nothing
     ) As Boolean
-        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas, cacheDirectoriosDestino, mapaBd)
+        Return ModuloConversionJpg.EstaPdfYaProcesadoYCompletoJpg(origenBase, destinoBase, archivoPdf, totalPaginas, cacheDirectoriosDestino, mapaIndice, mapaBd)
     End Function
 
     ''' <summary>

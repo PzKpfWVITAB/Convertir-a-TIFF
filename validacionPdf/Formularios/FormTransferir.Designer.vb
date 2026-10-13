@@ -186,11 +186,34 @@ Partial Class FormTransferir
         Me.btnReparar.Text = "🛠️ Reparar Incompletos"
         Me.btnReparar.UseVisualStyleBackColor = True
         '
+        'btnIndexarOrigen
+        '
+        Me.btnIndexarOrigen.Font = New System.Drawing.Font("Microsoft Sans Serif", 9.0!, System.Drawing.FontStyle.Bold)
+        Me.btnIndexarOrigen.Location = New System.Drawing.Point(51, 168)
+        Me.btnIndexarOrigen.Name = "btnIndexarOrigen"
+        Me.btnIndexarOrigen.Size = New System.Drawing.Size(170, 30)
+        Me.btnIndexarOrigen.TabIndex = 17
+        Me.btnIndexarOrigen.Text = "📑 Indexar Origen"
+        Me.btnIndexarOrigen.UseVisualStyleBackColor = True
+        '
+        'lblResumenIndice
+        '
+        Me.lblResumenIndice.AutoSize = True
+        Me.lblResumenIndice.Font = New System.Drawing.Font("Microsoft Sans Serif", 9.0!)
+        Me.lblResumenIndice.ForeColor = System.Drawing.Color.FromArgb(CType(CType(20, Byte), Integer), CType(CType(70, Byte), Integer), CType(CType(140, Byte), Integer))
+        Me.lblResumenIndice.Location = New System.Drawing.Point(230, 174)
+        Me.lblResumenIndice.Name = "lblResumenIndice"
+        Me.lblResumenIndice.Size = New System.Drawing.Size(250, 18)
+        Me.lblResumenIndice.TabIndex = 18
+        Me.lblResumenIndice.Text = "Índice: Seleccione un origen"
+        '
         'FormTransferir
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(8.0!, 16.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
         Me.ClientSize = New System.Drawing.Size(1084, 926)
+        Me.Controls.Add(Me.lblResumenIndice)
+        Me.Controls.Add(Me.btnIndexarOrigen)
         Me.Controls.Add(Me.btnReparar)
         Me.Controls.Add(Me.btnConfigRecursos)
         Me.Controls.Add(Me.Label1)
@@ -228,4 +251,6 @@ Partial Class FormTransferir
     Friend WithEvents Label1 As Label
     Friend WithEvents btnConfigRecursos As Button
     Friend WithEvents btnReparar As Button
+    Friend WithEvents btnIndexarOrigen As Button
+    Friend WithEvents lblResumenIndice As Label
 End Class

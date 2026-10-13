@@ -1,4 +1,4 @@
-﻿Imports System.Collections.Concurrent
+Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Text
@@ -37,8 +37,143 @@ Public Class FormReparacion
         If Not String.IsNullOrEmpty(rutaDestinoInicial) Then txtDestino.Text = rutaDestinoInicial
     End Sub
 
+    Private cancelSourceIndexar As CancellationTokenSource = Nothing
+    Private estaIndexando As Boolean = False
+
     Private Sub FormReparacion_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         VerificarConexionBd()
+        ActualizarResumenIndiceEnUi(txtOrigen.Text.Trim())
+    End Sub
+
+    Private Sub txtOrigen_TextChanged(sender As Object, e As EventArgs) Handles txtOrigen.TextChanged
+        ActualizarResumenIndiceEnUi(txtOrigen.Text.Trim())
+    End Sub
+
+    Private Sub ActualizarResumenIndiceEnUi(ruta As String)
+        If String.IsNullOrWhiteSpace(ruta) Then
+            lblResumenIndice.Text = "Índice: Seleccione una carpeta de origen"
+            lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+            Exit Sub
+        End If
+
+        lblResumenIndice.Text = "Índice: Consultando..."
+        lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+
+        Task.Run(Sub()
+                     Dim resumen = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+                     Me.BeginInvoke(Sub()
+                                        If txtOrigen.Text.Trim().Equals(ruta.Trim(), StringComparison.OrdinalIgnoreCase) Then
+                                            lblResumenIndice.Text = resumen.ToString()
+                                            If resumen.Existe Then
+                                                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                                            Else
+                                                lblResumenIndice.ForeColor = Color.FromArgb(160, 90, 20)
+                                            End If
+                                        End If
+                                    End Sub)
+                 End Sub)
+    End Sub
+
+    Private Async Sub btnIndexarOrigen_Click(sender As Object, e As EventArgs) Handles btnIndexarOrigen.Click
+        If estaEjecutando OrElse estaIndexando Then
+            If cancelSourceIndexar IsNot Nothing Then
+                Dim resp = MessageBox.Show("¿Desea cancelar el proceso de indexación en curso?", "Cancelar Indexado", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                If resp = DialogResult.Yes Then
+                    cancelSourceIndexar.Cancel()
+                    btnIndexarOrigen.Text = "Cancelando..."
+                    btnIndexarOrigen.Enabled = False
+                End If
+            End If
+            Exit Sub
+        End If
+
+        Dim ruta = txtOrigen.Text.Trim()
+        If String.IsNullOrWhiteSpace(ruta) OrElse Not Directory.Exists(ruta) Then
+            MessageBox.Show("Seleccione una carpeta de origen válida antes de indexar.", "Origen no seleccionado", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Exit Sub
+        End If
+
+        Dim resumenActual = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+        Dim msgPregunta = $"Se creará/reconstruirá el índice de PDFs de origen en la base de datos para la ruta:{vbCrLf}{vbCrLf}" &
+                          $"{ruta}{vbCrLf}{vbCrLf}"
+        If resumenActual.Existe Then
+            msgPregunta &= $"Actualmente hay {resumenActual.TotalPdfs:#,##0} PDFs y {resumenActual.TotalPaginas:#,##0} páginas indexadas en esta ubicación.{vbCrLf}" &
+                           "Al continuar, se eliminará el índice anterior de esta ruta y se reindexará desde cero con los archivos actuales.{vbCrLf}{vbCrLf}"
+        Else
+            msgPregunta &= "Esta ubicación no tiene índice registrado todavía.{vbCrLf}{vbCrLf}"
+        End If
+        msgPregunta &= "¿Desea iniciar la indexación ahora?"
+
+        If MessageBox.Show(msgPregunta, "Confirmar Indexado de Origen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) <> DialogResult.Yes Then
+            Exit Sub
+        End If
+
+        estaIndexando = True
+        ConfigurarUiEstado(True, "Iniciando indexación de PDFs de origen...")
+        btnIndexarOrigen.Enabled = True
+        btnIndexarOrigen.Text = "⏹ Cancelar Indexado"
+        cancelSourceIndexar = New CancellationTokenSource()
+        Dim token = cancelSourceIndexar.Token
+
+        Dim hilos = ModuloRecursos.ObtenerHilosOptimos()
+        Try
+            Dim resumenFinal As ModuloIndiceOrigen.ResumenIndice = Nothing
+            Await Task.Run(Function()
+                               Return ModuloIndiceOrigen.ReindexarDirectorio(
+                                   ruta,
+                                   hilos,
+                                   token,
+                                   Sub(proc, tot, fase)
+                                       Me.BeginInvoke(Sub()
+                                                          If tot > 0 Then
+                                                              lblStatus.Text = $"{fase} {proc:#,##0}/{tot:#,##0}"
+                                                              lblResumenIndice.Text = $"{fase} {proc:#,##0}/{tot:#,##0}"
+                                                              Dim pct = CInt((proc / CDbl(tot)) * 100)
+                                                              progressBar1.Value = Math.Min(100, Math.Max(0, pct))
+                                                          Else
+                                                              lblStatus.Text = fase
+                                                              lblResumenIndice.Text = fase
+                                                          End If
+                                                      End Sub)
+                                   End Sub
+                               )
+                           End Function, token).ContinueWith(Sub(t)
+                                                                 If t.IsFaulted Then
+                                                                     Throw t.Exception.InnerException
+                                                                 ElseIf Not t.IsCanceled Then
+                                                                     resumenFinal = t.Result
+                                                                 End If
+                                                             End Sub)
+
+            If resumenFinal IsNot Nothing Then
+                lblResumenIndice.Text = resumenFinal.ToString()
+                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                MessageBox.Show($"Indexación completada exitosamente:{vbCrLf}{vbCrLf}" &
+                                $"• Total PDFs indexados: {resumenFinal.TotalPdfs:#,##0}{vbCrLf}" &
+                                $"• Total páginas registradas: {resumenFinal.TotalPaginas:#,##0}{vbCrLf}" &
+                                $"• PDFs sin leer/corruptos: {resumenFinal.TotalSinLeer:#,##0}",
+                                "Índice Actualizado", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            End If
+
+        Catch ex As OperationCanceledException
+            lblStatus.Text = "Indexación cancelada por el usuario."
+            lblResumenIndice.Text = "Indexación cancelada."
+            lblResumenIndice.ForeColor = Color.FromArgb(160, 40, 40)
+        Catch ex As Exception
+            lblStatus.Text = "Error en indexación: " & ex.Message
+            lblResumenIndice.Text = "Error en indexación."
+            lblResumenIndice.ForeColor = Color.FromArgb(180, 20, 20)
+            MessageBox.Show("Error durante la indexación: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        Finally
+            estaIndexando = False
+            btnIndexarOrigen.Text = "📑 Indexar Origen"
+            If cancelSourceIndexar IsNot Nothing Then
+                cancelSourceIndexar.Dispose()
+                cancelSourceIndexar = Nothing
+            End If
+            ConfigurarUiEstado(False)
+            ActualizarResumenIndiceEnUi(txtOrigen.Text.Trim())
+        End Try
     End Sub
 
     Private Sub VerificarConexionBd()
@@ -64,6 +199,7 @@ Public Class FormReparacion
             If Directory.Exists(txtOrigen.Text) Then fbd.SelectedPath = txtOrigen.Text
             If fbd.ShowDialog(Me) = DialogResult.OK Then
                 txtOrigen.Text = fbd.SelectedPath
+                ActualizarResumenIndiceEnUi(txtOrigen.Text.Trim())
             End If
         End Using
     End Sub
@@ -156,6 +292,7 @@ Public Class FormReparacion
                                ' 2. Cargar la base de datos completa en memoria en UN SOLO VIAJE (O(1))
                                Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice de base de datos en memoria para máxima velocidad...")
                                Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+                               Dim mapaIndice = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
 
                                ' 3. Análisis masivo multinúcleo concurrente
                                Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
@@ -177,7 +314,7 @@ Public Class FormReparacion
                                    End If
 
                                    Try
-                                       Dim item = AnalizarUnPdfOptimizado(origen, destinoEfectivo, rutaPdf, mapaBd)
+                                       Dim item = AnalizarUnPdfOptimizado(origen, destinoEfectivo, rutaPdf, mapaBd, mapaIndice)
                                        bagItems.Add(item)
 
                                        If item.Estado.StartsWith("⚠️") OrElse item.Estado.StartsWith("📁") Then
@@ -250,13 +387,14 @@ Public Class FormReparacion
     End Sub
 
     ''' <summary>
-    ''' Auditoría ultrarrápida: consulta la BD en RAM (0 ms) y solo examina a fondo los que tienen discrepancias físicas.
+    ''' Auditoría ultrarrápida: consulta la BD y el índice de origen en RAM (0 ms) y solo examina a fondo los que tienen discrepancias físicas.
     ''' </summary>
     Private Function AnalizarUnPdfOptimizado(
         origenBase As String,
         destinoBase As String,
         rutaPdf As String,
-        mapaBd As Dictionary(Of String, ModuloConversionJpg.InfoRegistroBd)
+        mapaBd As Dictionary(Of String, ModuloConversionJpg.InfoRegistroBd),
+        Optional mapaIndice As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing
     ) As ItemDiagnostico
         Dim item As New ItemDiagnostico()
         item.RutaPdf = rutaPdf
@@ -270,6 +408,17 @@ Public Class FormReparacion
 
         item.CarpetaOrigen = Path.GetDirectoryName(rutaPdf)
         item.CarpetaDestino = carpetaDestinoEsperada
+
+        ' 0. Obtener páginas esperadas del índice permanente en memoria si existe (0 ms / O(1))
+        Dim pagsIndice As Integer = 0
+        If mapaIndice IsNot Nothing Then
+            Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
+            If mapaIndice.TryGetValue(rutaPdf, infoIndice) Then
+                pagsIndice = infoIndice.Paginas
+            ElseIf mapaIndice.TryGetValue(item.Documento, infoIndice) Then
+                pagsIndice = infoIndice.Paginas
+            End If
+        End If
 
         Try
             ' 1. Consulta ultrarrápida en memoria (O(1))
@@ -290,8 +439,11 @@ Public Class FormReparacion
             If Not Directory.Exists(carpetaDestinoEsperada) Then
                 item.Estado = "❌ Faltante total"
                 item.JpgsFisicos = 0
-                ' Si no está en BD o BD tenía 0, leer las páginas reales del PDF físico
-                Dim pags As Integer = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                ' Priorizar índice en memoria (0 ms), luego BD, y como último recurso leer por red
+                Dim pags As Integer = pagsIndice
+                If pags <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
+                    pags = infoBd.Paginas
+                End If
                 If pags <= 0 Then
                     pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
                 End If
@@ -310,8 +462,11 @@ Public Class FormReparacion
 
             If archivosJpg.Length = 0 Then
                 item.Estado = "📁 Carpeta vacía"
-                ' Si no está en BD o BD tenía 0, leer las páginas reales del PDF físico
-                Dim pags As Integer = If(infoBd IsNot Nothing AndAlso infoBd.Paginas > 0, infoBd.Paginas, 0)
+                ' Priorizar índice en memoria (0 ms), luego BD, y como último recurso leer por red
+                Dim pags As Integer = pagsIndice
+                If pags <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
+                    pags = infoBd.Paginas
+                End If
                 If pags <= 0 Then
                     pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
                 End If
@@ -335,8 +490,34 @@ Public Class FormReparacion
                 Return item
             End If
 
-            ' 4. Si hay discrepancia o no está en BD, examinar el PDF original con múltiples motores
-            Dim pagsEsperadas As Integer = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+            ' 3b. Vía rápida usando el índice permanente en memoria si coincide exactamente con los JPGs físicos
+            If pagsIndice > 0 AndAlso pagsIndice = archivosJpg.Length Then
+                item.PagsEsperadas = pagsIndice
+                Dim errInt As String = ""
+                If ModuloConversionJpg.ValidarIntegridadDiagnosticoRapidoJpg(carpetaDestinoEsperada, nombreSinExt, pagsIndice, errInt) Then
+                    If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" Then
+                        item.Estado = "✔️ Correcto (OK)"
+                        item.Detalle = "Físico completo y verificado contra índice y BD."
+                        item.EsIncompletoOFaltante = False
+                        item.Seleccionado = False
+                    Else
+                        item.Estado = "⚠️ Físico OK (Falta en BD)"
+                        item.Detalle = "Imágenes JPG completas en disco según índice pero falta confirmar en BD."
+                        item.EsIncompletoOFaltante = True
+                        item.Seleccionado = True
+                    End If
+                    Return item
+                End If
+            End If
+
+            ' 4. Si hay discrepancia o no está en BD, examinar las páginas esperadas (Índice en RAM primero, SMB como fallback)
+            Dim pagsEsperadas As Integer = pagsIndice
+            If pagsEsperadas <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
+                pagsEsperadas = infoBd.Paginas
+            End If
+            If pagsEsperadas <= 0 Then
+                pagsEsperadas = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
+            End If
             item.PagsEsperadas = pagsEsperadas
 
             If pagsEsperadas <= 0 Then
@@ -398,7 +579,7 @@ Public Class FormReparacion
     End Function
 
     Private Function AnalizarUnPdf(origenBase As String, destinoBase As String, rutaPdf As String) As ItemDiagnostico
-        Return AnalizarUnPdfOptimizado(origenBase, destinoBase, rutaPdf, Nothing)
+        Return AnalizarUnPdfOptimizado(origenBase, destinoBase, rutaPdf, Nothing, Nothing)
     End Function
 
     Private Sub ActualizarVistaGrilla()
