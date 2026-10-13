@@ -699,8 +699,8 @@ Public Class FormReparacion
 
         progressBar1.Value = 0
 
-        Dim maxHilos = Math.Max(2, Math.Min(Environment.ProcessorCount, ModuloRecursos.ObtenerHilosRedOptimos()))
-        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (red controlada). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
+        Dim maxHilos = ModuloRecursos.ObtenerHilosOptimos()
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (máxima potencia 90% CPU). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
 
         Try
             Await Task.Run(Sub()

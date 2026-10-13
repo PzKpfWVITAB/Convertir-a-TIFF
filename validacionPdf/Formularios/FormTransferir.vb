@@ -623,9 +623,8 @@ Public Class FormTransferir
         End If
 
         ' Segmentación dual por peso:
-        ' 1. PDFs Grandes (> 30 MB): Procesados secuencialmente a nivel de documento,
-        '    pero utilizando los 100 hilos concurrentes para sus páginas (Protección total de disco local).
-        ' 2. PDFs Pequeños (<= 30 MB): Procesados a nivel de documento con 100 hilos concurrentes.
+        ' 1. PDFs Grandes (> 30 MB): Hasta 20 documentos concurrentes en paralelo con multihilo de encoding por documento.
+        ' 2. PDFs Pequeños (<= 30 MB): Procesados a nivel de documento con máxima potencia de núcleos (hasta 48+ hilos concurrentes).
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
         Dim listaGrandes = listaPendientes.Where(Function(f) obtenerPesoBytes(f) > limiteGrandeBytes).ToList()
         Dim listaPequenos = listaPendientes.Where(Function(f) obtenerPesoBytes(f) <= limiteGrandeBytes).ToList()
@@ -636,8 +635,8 @@ Public Class FormTransferir
         ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
         ' =========================================================================
         If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            Dim hilosGrandes = Math.Max(1, Math.Min(3, CInt(Math.Floor(Environment.ProcessorCount * 0.2))))
-            Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ hilosGrandes))
+            Dim hilosGrandes = Math.Max(1, Math.Min(20, maxHilos))
+            Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ hilosGrandes)))
 
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
                 bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes ({Environment.ProcessorCount} núcleos detectados)")
