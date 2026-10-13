@@ -36,6 +36,8 @@ Partial Class FormTransferir
         Me.ListBoxDestino = New System.Windows.Forms.ListBox()
         Me.SplitContainer1 = New System.Windows.Forms.SplitContainer()
         Me.Label1 = New System.Windows.Forms.Label()
+        Me.btnIndexarOrigen = New System.Windows.Forms.Button()
+        Me.lblResumenIndice = New System.Windows.Forms.Label()
         CType(Me.dgvBitacora, System.ComponentModel.ISupportInitialize).BeginInit()
         CType(Me.SplitContainer1, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.SplitContainer1.SuspendLayout()
