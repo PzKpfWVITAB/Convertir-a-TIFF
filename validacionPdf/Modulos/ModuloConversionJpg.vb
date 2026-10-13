@@ -373,14 +373,14 @@ Public Module ModuloConversionJpg
             Dim conteoDestino = archivosJpg.Length
             If conteoDestino = 0 Then Return False
 
-            ' 3. Determinar páginas esperadas desde el índice de origen en memoria
+            ' 3. Determinar páginas esperadas desde el índice de origen en memoria (O(1))
             Dim paginasEsperadas As Integer = 0
             If mapaIndice IsNot Nothing Then
                 Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
                 If mapaIndice.TryGetValue(archivoPdf, infoIndice) Then
-                    If infoIndice.Paginas > 0 Then
-                        paginasEsperadas = infoIndice.Paginas
-                    End If
+                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
+                ElseIf mapaIndice.TryGetValue(Path.GetFileName(archivoPdf), infoIndice) Then
+                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
                 End If
             End If
 
@@ -394,14 +394,20 @@ Public Module ModuloConversionJpg
                 End If
             End If
 
-            ' Si se conocen las páginas esperadas y no coinciden con las imágenes físicas generadas, no está completo
-            If paginasEsperadas > 0 AndAlso conteoDestino <> paginasEsperadas Then
-                Return False
+            ' Si conocemos las páginas esperadas (por el índice o BD):
+            ' Si el conteo coincide exactamente, está completo. Retorno inmediato O(1) sin re-escanear disco ni abrir SMB.
+            If paginasEsperadas > 0 Then
+                If conteoDestino = paginasEsperadas Then
+                    totalPaginas = paginasEsperadas
+                    Return True
+                Else
+                    Return False
+                End If
             End If
 
-            totalPaginas = If(paginasEsperadas > 0, paginasEsperadas, conteoDestino)
+            totalPaginas = conteoDestino
 
-            ' 4. Verificación ultrarrápida de integridad física (primera y última página con cabecera JPEG válida en ~1 ms)
+            ' 4. Fallback solo si el archivo NO estaba indexado: verificación física
             Dim dummyError As String = ""
             Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, totalPaginas, dummyError)
         Catch

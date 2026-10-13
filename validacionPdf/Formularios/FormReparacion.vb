@@ -25,6 +25,7 @@ Public Class FormReparacion
         Public Property RutaPdf As String = ""
         Public Property Detalle As String = ""
         Public Property EsIncompletoOFaltante As Boolean = True
+        Public Property TamanoBytes As Long = 0
     End Class
 
     Public Sub New()
@@ -409,15 +410,25 @@ Public Class FormReparacion
         item.CarpetaOrigen = Path.GetDirectoryName(rutaPdf)
         item.CarpetaDestino = carpetaDestinoEsperada
 
-        ' 0. Obtener páginas esperadas del índice permanente en memoria si existe (0 ms / O(1))
+        ' 0. Obtener páginas esperadas y tamaño del índice permanente en memoria si existe (0 ms / O(1))
         Dim pagsIndice As Integer = 0
         If mapaIndice IsNot Nothing Then
             Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
             If mapaIndice.TryGetValue(rutaPdf, infoIndice) Then
                 pagsIndice = infoIndice.Paginas
+                item.TamanoBytes = infoIndice.Tamano
             ElseIf mapaIndice.TryGetValue(item.Documento, infoIndice) Then
                 pagsIndice = infoIndice.Paginas
+                item.TamanoBytes = infoIndice.Tamano
             End If
+        End If
+
+        If item.TamanoBytes <= 0 Then
+            Try
+                Dim fi As New FileInfo(rutaPdf)
+                If fi.Exists Then item.TamanoBytes = fi.Length
+            Catch
+            End Try
         End If
 
         Try
@@ -636,17 +647,35 @@ Public Class FormReparacion
     Private Async Sub btnReparar_Click(sender As Object, e As EventArgs) Handles btnReparar.Click
         If estaEjecutando Then Exit Sub
 
-        ' Recoger elementos marcados para reparar
+        ' Recoger elementos marcados para reparar y ordenar estrictamente de mayor a menor peso (más pesados primero)
         SincronizarSeleccionDesdeGrilla()
-        Dim aReparar = listaCompletaItems.Where(Function(it) it.Seleccionado AndAlso it.EsIncompletoOFaltante).ToList()
+        Dim aReparar = listaCompletaItems.Where(Function(it) it.Seleccionado AndAlso it.EsIncompletoOFaltante) _
+            .OrderByDescending(Function(it)
+                                   If it.TamanoBytes > 0 Then Return it.TamanoBytes
+                                   Try
+                                       Dim fi As New FileInfo(it.RutaPdf)
+                                       If fi.Exists Then
+                                           it.TamanoBytes = fi.Length
+                                           Return it.TamanoBytes
+                                       End If
+                                   Catch
+                                   End Try
+                                   Return 0L
+                               End Function) _
+            .ToList()
 
         If aReparar.Count = 0 Then
             MessageBox.Show("No hay archivos incompletos o faltantes seleccionados para reparar.", "Sin selección", MessageBoxButtons.OK, MessageBoxIcon.Information)
             Exit Sub
         End If
 
+        Dim total = aReparar.Count
+        Dim pesoMaxMB = If(total > 0, (aReparar.First().TamanoBytes / (1024.0 * 1024.0)), 0.0)
+        Dim pesoMinMB = If(total > 0, (aReparar.Last().TamanoBytes / (1024.0 * 1024.0)), 0.0)
+
         Dim resp = MessageBox.Show(
-            $"Se repararán {aReparar.Count} archivos detectados con discrepancias o incompletos.{vbCrLf}{vbCrLf}" &
+            $"Se repararán {aReparar.Count} archivos detectados con discrepancias o incompletos.{vbCrLf}" &
+            $"Prioridad: Ordenados por peso (de mayor a menor peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín).{vbCrLf}{vbCrLf}" &
             "Acciones que realizará el sistema:" & vbCrLf &
             "1. Eliminará las carpetas y archivos destino incompletos para evitar mezclas o corrupción." & vbCrLf &
             "2. Convertirá directamente los PDFs originales a imágenes JPG a 200 DPI." & vbCrLf &
@@ -660,11 +689,10 @@ Public Class FormReparacion
 
         If resp <> DialogResult.Yes Then Exit Sub
 
-        ConfigurarUiEstado(True, "Iniciando reparación de archivos incompletos...")
+        ConfigurarUiEstado(True, $"Iniciando reparación de {total} archivos (Más pesados primero: {pesoMaxMB:0.1} MB -> {pesoMinMB:0.1} MB)...")
         cancelSource = New CancellationTokenSource()
         Dim token = cancelSource.Token
 
-        Dim total = aReparar.Count
         Dim procesados As Integer = 0
         Dim reparadosOk As Integer = 0
         Dim fallados As Integer = 0
@@ -672,7 +700,7 @@ Public Class FormReparacion
         progressBar1.Value = 0
 
         Dim maxHilos = Math.Max(2, Math.Min(Environment.ProcessorCount, ModuloRecursos.ObtenerHilosRedOptimos()))
-        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (red controlada).")
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (red controlada). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
 
         Try
             Await Task.Run(Sub()
@@ -773,7 +801,8 @@ Public Class FormReparacion
 
                                    Me.BeginInvoke(Sub()
                                                       progressBar1.Value = Math.Min(100, pct)
-                                                      lblStatus.Text = $"Reparando ({actual}/{total}): {item.Documento} -> {item.Estado}"
+                                                      Dim mbDoc = item.TamanoBytes / (1024.0 * 1024.0)
+                                                      lblStatus.Text = $"Reparando ({actual}/{total}) [{mbDoc:0.1} MB]: {item.Documento} -> {item.Estado}"
                                                       lblEstadisticas.Text = $"Total a reparar: {total} | Reparados OK: {reparadosOk} | Errores: {fallados}"
                                                   End Sub)
                                End Sub)

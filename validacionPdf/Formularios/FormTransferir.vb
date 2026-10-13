@@ -460,8 +460,36 @@ Public Class FormTransferir
         ' RESOLVER DESTINO EFECTIVO CON LA JERARQUÍA OFICIAL DE ENTREGABLES
         Dim destinoEfectivo As String = ResolverDestinoEfectivo(origen, destino)
 
-        Dim dirInfo As New DirectoryInfo(origen)
-        Dim archivos As FileInfo() = dirInfo.EnumerateFiles("*.pdf", SearchOption.AllDirectories).ToArray()
+        ' 1. Cargar el índice de origen primero (O(1) en MySQL en ~10 ms)
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            bgWorker.ReportProgress(0, "STATUS|Consultando índice permanente de origen en base de datos...")
+        End If
+
+        Dim mapaIndiceOrigen As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing
+        Try
+            mapaIndiceOrigen = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
+        Catch
+            mapaIndiceOrigen = Nothing
+        End Try
+
+        ' 2. Obtener lista de archivos a procesar:
+        ' Si la carpeta ya está indexada en MySQL, usamos directamente los archivos del índice (0 ms, sin escanear SMB por red)
+        Dim archivos As FileInfo() = Nothing
+        If mapaIndiceOrigen IsNot Nothing AndAlso mapaIndiceOrigen.Count > 0 Then
+            Dim rutasIndexadas = mapaIndiceOrigen.Keys.Where(Function(k) k.Contains(Path.DirectorySeparatorChar) OrElse k.Contains("/"c)).ToList()
+            archivos = rutasIndexadas.Select(Function(r) New FileInfo(r)).ToArray()
+            EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INDICE ORIGEN ACTIVO | Se cargaron {archivos.Length:#,##0} PDFs directamente de la base de datos (0 ms por red SMB).")
+        End If
+
+        ' Si no había índice previo, realizar escaneo en disco/red como fallback
+        If archivos Is Nothing OrElse archivos.Length = 0 Then
+            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                bgWorker.ReportProgress(0, "STATUS|Buscando archivos PDF en carpeta de origen...")
+            End If
+            Dim dirInfo As New DirectoryInfo(origen)
+            archivos = dirInfo.EnumerateFiles("*.pdf", SearchOption.AllDirectories).ToArray()
+        End If
+
         Dim total As Integer = archivos.Length
         Dim procesados As Integer = 0
         Dim delegacionSeleccionada As String = New DirectoryInfo(destinoEfectivo).Name
@@ -497,57 +525,71 @@ Public Class FormTransferir
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
         ' =========================================================================
         If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino...")
+            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino a alta velocidad...")
         End If
 
         ' Caché concurrente en RAM de subdirectorios existentes por cada carpeta padre en destino.
-        ' Evita saturar SMB realizando una sola consulta por carpeta padre en lugar de cientos de miles individuales.
         Dim cacheDirectoriosDestino As New ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
-
-        ' Cargar en memoria el índice permanente de origen (si existe) para esta carpeta específica
-        Dim mapaIndiceOrigen As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing
-        Try
-            mapaIndiceOrigen = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
-        Catch
-            mapaIndiceOrigen = Nothing
-        End Try
 
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
         Dim contadorChequeados As Integer = 0
 
-        Parallel.ForEach(archivos, Sub(archivoInfo, state)
-                                       If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                                           state.Stop()
-                                           Exit Sub
-                                       End If
+        Dim hilosPrechequeo = Math.Max(4, Math.Min(Environment.ProcessorCount * 2, ModuloRecursos.ObtenerHilosRedOptimos()))
+        Dim poptPrechequeo As New ParallelOptions With {
+            .MaxDegreeOfParallelism = hilosPrechequeo,
+            .CancellationToken = cancelToken
+        }
 
-                                       Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen) Then
-                                           bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
-                                       Else
-                                           bagPendientes.Add(archivoInfo)
-                                       End If
+        Parallel.ForEach(archivos, poptPrechequeo, Sub(archivoInfo, state)
+                                                       If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                                                           state.Stop()
+                                                           Exit Sub
+                                                       End If
 
-                                       Dim actual = Interlocked.Increment(contadorChequeados)
-                                       If (actual Mod 100 = 0 OrElse actual = total) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                                           Dim pct = CInt((actual / Math.Max(1, total)) * 10)
-                                           bgWorker.ReportProgress(pct, $"STATUS|Pre-chequeo: {actual:#,##0}/{total:#,##0} analizados ({bagOmitidos.Count:#,##0} ya listos)")
-                                       End If
-                                   End Sub)
+                                                       Dim pagsCompletas As Integer = 0
+                                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen) Then
+                                                           bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
+                                                       Else
+                                                           bagPendientes.Add(archivoInfo)
+                                                       End If
+
+                                                       Dim actual = Interlocked.Increment(contadorChequeados)
+                                                       If (actual Mod 100 = 0 OrElse actual = total) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                                                           Dim pct = CInt((actual / Math.Max(1, total)) * 10)
+                                                           bgWorker.ReportProgress(pct, $"STATUS|Pre-chequeo ({hilosPrechequeo} hilos): {actual:#,##0}/{total:#,##0} analizados ({bagOmitidos.Count:#,##0} ya listos)")
+                                                       End If
+                                                   End Sub)
 
         If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
             Exit Sub
         End If
 
+        ' Función rápida para obtener el peso del archivo (del índice en memoria si está disponible, evitando I/O de red)
+        Dim obtenerPesoBytes = Function(f As FileInfo) As Long
+                                   Dim infoIdx As ModuloIndiceOrigen.InfoIndicePdf = Nothing
+                                   If mapaIndiceOrigen IsNot Nothing Then
+                                       If mapaIndiceOrigen.TryGetValue(f.FullName, infoIdx) AndAlso infoIdx.Tamano > 0 Then
+                                           Return infoIdx.Tamano
+                                       ElseIf mapaIndiceOrigen.TryGetValue(f.Name, infoIdx) AndAlso infoIdx.Tamano > 0 Then
+                                           Return infoIdx.Tamano
+                                       End If
+                                   End If
+                                   Try
+                                       Return f.Length
+                                   Catch
+                                       Return 0L
+                                   End Try
+                               End Function
+
         ' ORDENAR ESTRICTAMENTE DESCENDENTE POR PESO ORIGINAL DEL PDF (MÁS PESADOS PRIMERO, MENOS PESADOS AL FINAL)
-        Dim listaPendientes = bagPendientes.OrderByDescending(Function(f) f.Length).ToList()
+        Dim listaPendientes = bagPendientes.OrderByDescending(Function(f) obtenerPesoBytes(f)).ToList()
         Dim listaOmitidos = bagOmitidos.ToList()
         Dim totalOmitidos = listaOmitidos.Count
         Dim totalPendientes = listaPendientes.Count
 
-        Dim pesoMaxMB = If(totalPendientes > 0, (listaPendientes.First().Length / (1024.0 * 1024.0)), 0)
-        Dim pesoMinMB = If(totalPendientes > 0, (listaPendientes.Last().Length / (1024.0 * 1024.0)), 0)
+        Dim pesoMaxMB = If(totalPendientes > 0, (obtenerPesoBytes(listaPendientes.First()) / (1024.0 * 1024.0)), 0)
+        Dim pesoMinMB = If(totalPendientes > 0, (obtenerPesoBytes(listaPendientes.Last()) / (1024.0 * 1024.0)), 0)
 
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | PRE-CHEQUEO FINALIZADO | Total: {total} | Ya completos (omitidos): {totalOmitidos} | Pendientes por procesar: {totalPendientes} (Rango peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín)")
 
@@ -585,8 +627,8 @@ Public Class FormTransferir
         '    pero utilizando los 100 hilos concurrentes para sus páginas (Protección total de disco local).
         ' 2. PDFs Pequeños (<= 30 MB): Procesados a nivel de documento con 100 hilos concurrentes.
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
-        Dim listaGrandes = listaPendientes.Where(Function(f) f.Length > limiteGrandeBytes).ToList()
-        Dim listaPequenos = listaPendientes.Where(Function(f) f.Length <= limiteGrandeBytes).ToList()
+        Dim listaGrandes = listaPendientes.Where(Function(f) obtenerPesoBytes(f) > limiteGrandeBytes).ToList()
+        Dim listaPequenos = listaPendientes.Where(Function(f) obtenerPesoBytes(f) <= limiteGrandeBytes).ToList()
 
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | DISTRIBUCIÓN DINÁMICA | Total: {totalPendientes} | Grandes (> 30 MB): {listaGrandes.Count} | Pequeños (<= 30 MB): {listaPequenos.Count}")
 

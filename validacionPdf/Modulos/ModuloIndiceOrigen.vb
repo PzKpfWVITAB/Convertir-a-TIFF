@@ -270,7 +270,12 @@ Public Module ModuloIndiceOrigen
                                 .Estatus = dr("estatus").ToString()
                             }
                             If Not IsDBNull(dr("fecha_mod")) Then info.FechaMod = Convert.ToDateTime(dr("fecha_mod"))
-                            dict(dr("ruta_completa").ToString()) = info
+                            Dim rutaComp = dr("ruta_completa").ToString()
+                            dict(rutaComp) = info
+                            Dim nomArch = Path.GetFileName(rutaComp)
+                            If Not String.IsNullOrEmpty(nomArch) AndAlso Not dict.ContainsKey(nomArch) Then
+                                dict(nomArch) = info
+                            End If
                         End While
                     End Using
                 End Using
