@@ -700,16 +700,16 @@ Public Class FormReparacion
         progressBar1.Value = 0
 
         Dim maxHilos = ModuloRecursos.ObtenerHilosOptimos()
-        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} archivos con {maxHilos} hilos (máxima potencia 90% CPU). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
+        Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
+        Dim listaGrandes = aReparar.Where(Function(i) i.TamanoBytes > limiteGrandeBytes).ToList()
+        Dim listaPequenos = aReparar.Where(Function(i) i.TamanoBytes <= limiteGrandeBytes).ToList()
+        Dim hilosGrandes = Math.Max(1, Math.Min(20, maxHilos))
+
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} (Grandes >30MB: {listaGrandes.Count} a {hilosGrandes} en paralelo | Ligeros <=30MB: {listaPequenos.Count} a {maxHilos} en paralelo [1 por núcleo]). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
 
         Try
             Await Task.Run(Sub()
-                               Dim popt As New ParallelOptions With {
-                                   .MaxDegreeOfParallelism = maxHilos,
-                                   .CancellationToken = token
-                               }
-
-                               Parallel.ForEach(aReparar, popt, Sub(item, state)
+                               Dim procesarItem = Sub(item As ItemDiagnostico, state As ParallelLoopState)
                                    If token.IsCancellationRequested Then state.Stop() : Exit Sub
 
                                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(item.Documento)
@@ -805,7 +805,25 @@ Public Class FormReparacion
                                                       lblStatus.Text = $"Reparando ({actual}/{total}) [{mbDoc:0.1} MB]: {item.Documento} -> {item.Estado}"
                                                       lblEstadisticas.Text = $"Total a reparar: {total} | Reparados OK: {reparadosOk} | Errores: {fallados}"
                                                   End Sub)
-                               End Sub)
+                               End Sub
+
+                               ' FASE 1: PDFs GRANDES (> 30 MB) — Hasta 20 archivos en paralelo
+                               If listaGrandes.Count > 0 AndAlso Not token.IsCancellationRequested Then
+                                   Dim poptGrandes As New ParallelOptions With {
+                                       .MaxDegreeOfParallelism = hilosGrandes,
+                                       .CancellationToken = token
+                                   }
+                                   Parallel.ForEach(listaGrandes, poptGrandes, procesarItem)
+                               End If
+
+                               ' FASE 2: PDFs LIGEROS (<= 30 MB) — Uno por cada núcleo (máx potencia)
+                               If listaPequenos.Count > 0 AndAlso Not token.IsCancellationRequested Then
+                                   Dim poptPequenos As New ParallelOptions With {
+                                       .MaxDegreeOfParallelism = maxHilos,
+                                       .CancellationToken = token
+                                   }
+                                   Parallel.ForEach(listaPequenos, poptPequenos, procesarItem)
+                               End If
                            End Sub, token)
 
             ActualizarVistaGrilla()
