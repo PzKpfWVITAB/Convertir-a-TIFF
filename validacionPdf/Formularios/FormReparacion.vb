@@ -378,8 +378,22 @@ Public Class FormReparacion
                                    If registrosBd IsNot Nothing AndAlso registrosBd.Count > 0 Then
                                        ' A. Detección de Duplicados en BD
                                        Dim idsBdAgregados As New HashSet(Of Long)()
-                                       Dim grupos = registrosBd.GroupBy(Function(r) If(Not String.IsNullOrEmpty(r.Documento), r.Documento, r.NombreOriginal), StringComparer.OrdinalIgnoreCase).
-                                                                Where(Function(g) Not String.IsNullOrEmpty(g.Key))
+
+                                       Dim normalizarNombre = Function(texto As String) As String
+                                           If String.IsNullOrWhiteSpace(texto) Then Return ""
+                                           Dim t = texto.Trim()
+                                           Try
+                                               Return Path.GetFileNameWithoutExtension(t).ToLowerInvariant()
+                                           Catch
+                                               Return t.ToLowerInvariant()
+                                           End Try
+                                       End Function
+
+                                       Dim grupos = registrosBd.GroupBy(Function(r)
+                                           Dim c = normalizarNombre(r.Documento)
+                                           If String.IsNullOrEmpty(c) Then c = normalizarNombre(r.NombreOriginal)
+                                           Return c
+                                       End Function, StringComparer.OrdinalIgnoreCase).Where(Function(g) Not String.IsNullOrEmpty(g.Key))
 
                                        For Each g In grupos
                                            If g.Count() > 1 Then
@@ -410,20 +424,44 @@ Public Class FormReparacion
                                        ' B. Detección de Huérfanos en BD (Existen en BD pero NO existen físicamente en disco)
                                        Dim setNombresFisicos As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
                                        For Each p In archivosPdf
+                                           Dim n = normalizarNombre(p)
+                                           If Not String.IsNullOrEmpty(n) Then setNombresFisicos.Add(n)
                                            setNombresFisicos.Add(Path.GetFileName(p))
-                                           setNombresFisicos.Add(Path.GetFileNameWithoutExtension(p))
                                        Next
 
                                        For Each reg In registrosBd
-                                           Dim nomSinExt = Path.GetFileNameWithoutExtension(reg.Documento)
-                                           Dim nomConExt = Path.GetFileName(reg.Documento)
-                                           Dim origSinExt = Path.GetFileNameWithoutExtension(reg.NombreOriginal)
-                                           Dim origConExt = Path.GetFileName(reg.NombreOriginal)
+                                           Dim claveDoc = normalizarNombre(reg.Documento)
+                                           Dim claveOrig = normalizarNombre(reg.NombreOriginal)
 
-                                           Dim existeFisico = setNombresFisicos.Contains(nomSinExt) OrElse
-                                                              setNombresFisicos.Contains(nomConExt) OrElse
-                                                              setNombresFisicos.Contains(origSinExt) OrElse
-                                                              setNombresFisicos.Contains(origConExt)
+                                           ' Caso B1: Documento en blanco o nulo en BD
+                                           If String.IsNullOrEmpty(claveDoc) AndAlso String.IsNullOrEmpty(claveOrig) Then
+                                               Dim idReg = reg.Id
+                                               If Not idsBdAgregados.Contains(idReg) Then
+                                                   idsBdAgregados.Add(idReg)
+                                                   Dim itemVacio As New ItemDiagnostico With {
+                                                       .IdBd = idReg,
+                                                       .Documento = $"(Registro sin nombre ID {idReg})",
+                                                       .CarpetaOrigen = reg.CarpetaOrigen,
+                                                       .CarpetaDestino = reg.CarpetaDestino,
+                                                       .PagsEsperadas = reg.Paginas,
+                                                       .JpgsFisicos = 0,
+                                                       .EnBd = $"Vacío (ID {idReg})",
+                                                       .Estado = "👻 Huérfano en BD",
+                                                       .Detalle = $"Registro corrupto en BD sin nombre de documento (ID: {idReg}). Al reparar se depurará de la BD.",
+                                                       .EsIncompletoOFaltante = True,
+                                                       .Seleccionado = True
+                                                   }
+                                                   bagItems.Add(itemVacio)
+                                                   Interlocked.Increment(totalIncompletos)
+                                                   EscribirLogReparador($"[BD_REGISTRO_VACIO] ID={idReg} | Origen='{reg.CarpetaOrigen}'")
+                                               End If
+                                               Continue For
+                                           End If
+
+                                           Dim existeFisico = (Not String.IsNullOrEmpty(claveDoc) AndAlso setNombresFisicos.Contains(claveDoc)) OrElse
+                                                              (Not String.IsNullOrEmpty(claveOrig) AndAlso setNombresFisicos.Contains(claveOrig)) OrElse
+                                                              (Not String.IsNullOrEmpty(reg.Documento) AndAlso setNombresFisicos.Contains(Path.GetFileName(reg.Documento))) OrElse
+                                                              (Not String.IsNullOrEmpty(reg.NombreOriginal) AndAlso setNombresFisicos.Contains(Path.GetFileName(reg.NombreOriginal)))
 
                                            If Not existeFisico Then
                                                Dim idReg = reg.Id
