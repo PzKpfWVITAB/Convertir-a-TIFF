@@ -26,6 +26,7 @@ Public Class FormReparacion
         Public Property Detalle As String = ""
         Public Property EsIncompletoOFaltante As Boolean = True
         Public Property TamanoBytes As Long = 0
+        Public Property IdBd As Long = 0
     End Class
 
     Public Sub New()
@@ -358,6 +359,88 @@ Public Class FormReparacion
                                    End Try
                                End Sub)
 
+                               ' 4. Verificación Bidireccional: Detectar Registros Huérfanos o Duplicados en BD
+                               Me.BeginInvoke(Sub() lblStatus.Text = "Verificando consistencia con la base de datos (duplicados y huérfanos)...")
+                               Try
+                                   Dim nombreCarpetaOrigen = Path.GetFileName(origen.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                                   Dim registrosBd = ModuloConversionJpg.ObtenerRegistrosBitacoraPorCarpeta(nombreCarpetaOrigen)
+
+                                   If registrosBd IsNot Nothing AndAlso registrosBd.Count > 0 Then
+                                       ' A. Detección de Duplicados en BD
+                                       Dim grupos = registrosBd.GroupBy(Function(r) If(Not String.IsNullOrEmpty(r.Documento), r.Documento, r.NombreOriginal), StringComparer.OrdinalIgnoreCase).
+                                                                Where(Function(g) Not String.IsNullOrEmpty(g.Key))
+
+                                       For Each g In grupos
+                                           If g.Count() > 1 Then
+                                               Dim ordenados = g.OrderByDescending(Function(r) If(r.Estatus = "OK", 1, 0)).ThenByDescending(Function(r) r.Id).ToList()
+                                               Dim idValido = ordenados.First().Id
+                                               For Each dup In ordenados.Skip(1)
+                                                   Dim itemDup As New ItemDiagnostico With {
+                                                       .IdBd = dup.Id,
+                                                       .Documento = dup.Documento,
+                                                       .CarpetaOrigen = dup.CarpetaOrigen,
+                                                       .CarpetaDestino = dup.CarpetaDestino,
+                                                       .PagsEsperadas = dup.Paginas,
+                                                       .JpgsFisicos = 0,
+                                                       .EnBd = $"Duplicado (ID {dup.Id})",
+                                                       .Estado = "👥 Duplicado en BD",
+                                                       .Detalle = $"Registro duplicado en BD (ID: {dup.Id}). Se conservará ID {idValido}. Al reparar se depurará de la BD para cuadrar.",
+                                                       .EsIncompletoOFaltante = True,
+                                                       .Seleccionado = True
+                                                   }
+                                                   bagItems.Add(itemDup)
+                                                   Interlocked.Increment(totalIncompletos)
+                                                   EscribirLogReparador($"[BD_DUPLICADO] Doc='{dup.Documento}' | ID Duplicado={dup.Id} | ID Válido={idValido}")
+                                               Next
+                                           End If
+                                       Next
+
+                                       ' B. Detección de Huérfanos en BD (Existen en BD pero NO existen físicamente en disco)
+                                       Dim setNombresFisicos As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                                       For Each p In archivosPdf
+                                           setNombresFisicos.Add(Path.GetFileName(p))
+                                           setNombresFisicos.Add(Path.GetFileNameWithoutExtension(p))
+                                       Next
+
+                                       For Each reg In registrosBd
+                                           Dim nomSinExt = Path.GetFileNameWithoutExtension(reg.Documento)
+                                           Dim nomConExt = Path.GetFileName(reg.Documento)
+                                           Dim origSinExt = Path.GetFileNameWithoutExtension(reg.NombreOriginal)
+                                           Dim origConExt = Path.GetFileName(reg.NombreOriginal)
+
+                                           Dim existeFisico = setNombresFisicos.Contains(nomSinExt) OrElse
+                                                              setNombresFisicos.Contains(nomConExt) OrElse
+                                                              setNombresFisicos.Contains(origSinExt) OrElse
+                                                              setNombresFisicos.Contains(origConExt)
+
+                                           If Not existeFisico Then
+                                               Dim idReg = reg.Id
+                                               Dim yaAgregado = bagItems.Any(Function(it) it.IdBd = idReg)
+                                               If Not yaAgregado Then
+                                                   Dim itemHuerfano As New ItemDiagnostico With {
+                                                       .IdBd = reg.Id,
+                                                       .Documento = reg.Documento,
+                                                       .CarpetaOrigen = reg.CarpetaOrigen,
+                                                       .CarpetaDestino = reg.CarpetaDestino,
+                                                       .PagsEsperadas = reg.Paginas,
+                                                       .JpgsFisicos = 0,
+                                                       .EnBd = $"Huérfano (ID {reg.Id})",
+                                                       .Estado = "👻 Huérfano en BD",
+                                                       .Detalle = $"Existe en BD (ID: {reg.Id}) pero el archivo PDF físico ya no existe en la carpeta de origen. Al reparar se depurará de la BD para cuadrar.",
+                                                       .EsIncompletoOFaltante = True,
+                                                       .Seleccionado = True
+                                                   }
+                                                   bagItems.Add(itemHuerfano)
+                                                   Interlocked.Increment(totalIncompletos)
+                                                   EscribirLogReparador($"[BD_HUERFANO] Doc='{reg.Documento}' | ID={reg.Id} | Origen='{reg.CarpetaOrigen}'")
+                                               End If
+                                           End If
+                                       Next
+                                   End If
+                               Catch exBdCheck As Exception
+                                   EscribirLogReparador($"[ERROR_CHECK_BD_BIDIRECCIONAL] {exBdCheck.Message}")
+                               End Try
+
                                listaCompletaItems = bagItems.OrderBy(Function(i) i.Documento).ToList()
                            End Sub, token)
 
@@ -626,6 +709,9 @@ Public Class FormReparacion
             ElseIf item.Estado.StartsWith("❌") OrElse item.Estado.StartsWith("📁") Then
                 fila.Cells(ColEstado.Index).Style.BackColor = Color.FromArgb(255, 225, 225)
                 fila.Cells(ColEstado.Index).Style.ForeColor = Color.FromArgb(180, 20, 20)
+            ElseIf item.Estado.StartsWith("👻") OrElse item.Estado.StartsWith("👥") Then
+                fila.Cells(ColEstado.Index).Style.BackColor = Color.FromArgb(245, 230, 255)
+                fila.Cells(ColEstado.Index).Style.ForeColor = Color.FromArgb(120, 30, 160)
             End If
 
             filasNuevas.Add(fila)
@@ -714,6 +800,33 @@ Public Class FormReparacion
             Await Task.Run(Sub()
                                Dim procesarItem = Sub(item As ItemDiagnostico)
                                    If token.IsCancellationRequested Then Exit Sub
+
+                                   ' Manejo de registros huérfanos o duplicados en BD (depurar de BD para cuadrar cifras)
+                                   If item.IdBd > 0 AndAlso (item.Estado.Contains("Duplicado") OrElse item.Estado.Contains("Huérfano")) Then
+                                       Dim borrado = ModuloConversionJpg.EliminarRegistroDeBitacoraPorId(item.IdBd)
+                                       If borrado Then
+                                           item.Estado = "✔️ Depurado de BD"
+                                           item.Detalle = $"Registro ID {item.IdBd} eliminado de la base de datos con éxito. BD cuadrada."
+                                           item.EsIncompletoOFaltante = False
+                                           item.Seleccionado = False
+                                           Interlocked.Increment(reparadosOk)
+                                           EscribirLogReparador($"[DEPURADO_BD_OK] ID={item.IdBd} | Doc='{item.Documento}'")
+                                       Else
+                                           item.Estado = "❌ Error al depurar BD"
+                                           item.Detalle = $"No se pudo eliminar el registro ID {item.IdBd} de la base de datos."
+                                           Interlocked.Increment(fallados)
+                                           EscribirLogReparador($"[ERROR_DEPURADO_BD] ID={item.IdBd} | Doc='{item.Documento}'")
+                                       End If
+
+                                       Dim actualDep = Interlocked.Increment(procesados)
+                                       Dim pctDep = CInt((actualDep / CDbl(total)) * 100)
+                                       Me.BeginInvoke(Sub()
+                                                          progressBar1.Value = Math.Min(100, pctDep)
+                                                          lblStatus.Text = $"Depurando BD ({actualDep}/{total}): {item.Documento} -> {item.Estado}"
+                                                          lblEstadisticas.Text = $"Total a reparar: {total} | Reparados/Depurados OK: {reparadosOk} | Errores: {fallados}"
+                                                      End Sub)
+                                       Exit Sub
+                                   End If
 
                                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(item.Documento)
                                    Dim carpetaDestino = item.CarpetaDestino

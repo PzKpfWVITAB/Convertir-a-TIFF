@@ -976,4 +976,83 @@ Public Module ModuloConversionJpg
         End Try
     End Sub
 
+    Public Class RegistroDetalleBd
+        Public Property Id As Long = 0
+        Public Property Documento As String = ""
+        Public Property NombreOriginal As String = ""
+        Public Property CarpetaOrigen As String = ""
+        Public Property CarpetaDestino As String = ""
+        Public Property Estatus As String = ""
+        Public Property Paginas As Integer = 0
+        Public Property Fecha As DateTime = DateTime.MinValue
+    End Class
+
+    ''' <summary>
+    ''' Obtiene todos los registros de la bitácora que coinciden con una carpeta origen (para análisis bidireccional y detección de huérfanos/duplicados).
+    ''' </summary>
+    Public Function ObtenerRegistrosBitacoraPorCarpeta(filtroCarpeta As String) As List(Of RegistroDetalleBd)
+        Dim lista As New List(Of RegistroDetalleBd)()
+        If String.IsNullOrWhiteSpace(filtroCarpeta) Then Return lista
+        Try
+            Using conn As New MySqlConnection(CadenaConexionMysql)
+                conn.Open()
+                For Each tbl In {NombreTablaBitacora, "bitacora_transferencia_tiff"}
+                    Try
+                        Dim sql = $"SELECT id, documento, nombre_original, carpeta_origen, carpeta_destino, paginas, estatus, fecha " &
+                                  $"FROM {tbl} WHERE carpeta_origen LIKE @filtro OR disk LIKE @filtro"
+                        Using cmd As New MySqlCommand(sql, conn)
+                            cmd.CommandTimeout = 120
+                            cmd.Parameters.AddWithValue("@filtro", "%" & filtroCarpeta & "%")
+                            Using dr = cmd.ExecuteReader()
+                                While dr.Read()
+                                    lista.Add(New RegistroDetalleBd With {
+                                        .Id = Convert.ToInt64(dr("id")),
+                                        .Documento = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim()),
+                                        .NombreOriginal = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim()),
+                                        .CarpetaOrigen = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim()),
+                                        .CarpetaDestino = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim()),
+                                        .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
+                                        .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
+                                        .Fecha = If(IsDBNull(dr("fecha")), DateTime.MinValue, Convert.ToDateTime(dr("fecha")))
+                                    })
+                                End While
+                            End Using
+                        End Using
+                        Exit For
+                    Catch exTbl As MySqlException When exTbl.Number = 1146
+                    End Try
+                Next
+            End Using
+        Catch ex As Exception
+            Debug.WriteLine("Error al obtener registros de bitácora por carpeta: " & ex.Message)
+        End Try
+        Return lista
+    End Function
+
+    ''' <summary>
+    ''' Elimina un registro específico de la bitácora por su ID (usado para depurar duplicados o registros huérfanos que no existen en disco).
+    ''' </summary>
+    Public Function EliminarRegistroDeBitacoraPorId(idRegistro As Long) As Boolean
+        If idRegistro <= 0 Then Return False
+        Try
+            Using conn As New MySqlConnection(CadenaConexionMysql)
+                conn.Open()
+                For Each tbl In {NombreTablaBitacora, "bitacora_transferencia_tiff"}
+                    Try
+                        Dim sql = $"DELETE FROM {tbl} WHERE id = @id"
+                        Using cmd As New MySqlCommand(sql, conn)
+                            cmd.Parameters.AddWithValue("@id", idRegistro)
+                            Dim filas = cmd.ExecuteNonQuery()
+                            If filas > 0 Then Return True
+                        End Using
+                    Catch exTbl As MySqlException When exTbl.Number = 1146
+                    End Try
+                Next
+            End Using
+        Catch ex As Exception
+            Debug.WriteLine($"Error al eliminar registro {idRegistro} de bitácora: " & ex.Message)
+        End Try
+        Return False
+    End Function
+
 End Module
