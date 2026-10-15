@@ -270,8 +270,8 @@ Public Class FormTransferir
         Dim msgPregunta = $"Se creará/reconstruirá el índice de PDFs de origen en la base de datos para la ruta:{vbCrLf}{vbCrLf}" &
                           $"{ruta}{vbCrLf}{vbCrLf}"
         If resumenActual.Existe Then
-            msgPregunta &= $"Actualmente hay {resumenActual.TotalPdfs:#,##0} PDFs y {resumenActual.TotalPaginas:#,##0} páginas indexadas en esta ubicación.{vbCrLf}" &
-                           "Al continuar, se eliminará el índice anterior de esta ruta y se reindexará desde cero con los archivos actuales.{vbCrLf}{vbCrLf}"
+            msgPregunta &= $"Actualmente hay {resumenActual.TotalPdfs:#,##0} PDFs indexados en esta ubicación.{vbCrLf}" &
+                           "Al continuar, se actualizará el índice de inventario con los archivos actuales.{vbCrLf}{vbCrLf}"
         Else
             msgPregunta &= "Esta ubicación no tiene índice registrado todavía.{vbCrLf}{vbCrLf}"
         End If
@@ -316,11 +316,13 @@ Public Class FormTransferir
             If resumenFinal IsNot Nothing Then
                 lblResumenIndice.Text = resumenFinal.ToString()
                 lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
-                MessageBox.Show($"Indexación completada exitosamente:{vbCrLf}{vbCrLf}" &
-                                $"• Total PDFs indexados: {resumenFinal.TotalPdfs:#,##0}{vbCrLf}" &
-                                $"• Total páginas registradas: {resumenFinal.TotalPaginas:#,##0}{vbCrLf}" &
-                                $"• PDFs sin leer/corruptos: {resumenFinal.TotalSinLeer:#,##0}",
-                                "Índice Actualizado", MessageBoxButtons.OK, MessageBoxIcon.Information)
+                Dim msgExito = $"Inventario de PDFs indexado exitosamente:{vbCrLf}{vbCrLf}" &
+                               $"• Total PDFs en inventario: {resumenFinal.TotalPdfs:#,##0}{vbCrLf}" &
+                               $"• Ubicación: {ruta}"
+                If resumenFinal.TotalPaginas > 0 Then
+                    msgExito &= $"{vbCrLf}• Páginas registradas: {resumenFinal.TotalPaginas:#,##0}"
+                End If
+                MessageBox.Show(msgExito, "Índice de Inventario Actualizado", MessageBoxButtons.OK, MessageBoxIcon.Information)
             End If
 
         Catch ex As OperationCanceledException

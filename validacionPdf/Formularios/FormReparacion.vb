@@ -545,18 +545,15 @@ Public Class FormReparacion
             If Not Directory.Exists(carpetaDestinoEsperada) Then
                 item.Estado = "❌ Faltante total"
                 item.JpgsFisicos = 0
-                ' Priorizar índice en memoria (0 ms), luego BD, y como último recurso leer por red
+                ' Priorizar índice en memoria (0 ms), luego BD
                 Dim pags As Integer = pagsIndice
                 If pags <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
                     pags = infoBd.Paginas
                 End If
-                If pags <= 0 Then
-                    pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
-                End If
                 item.PagsEsperadas = pags
                 item.Detalle = If(pags > 0,
                     $"La carpeta destino no existe físicamente en el almacenamiento. (Se creará con sus {pags} páginas al reparar)",
-                    "La carpeta destino no existe y no se pudieron leer las páginas del PDF origen.")
+                    "La carpeta destino no existe en el almacenamiento. (Se convertirá al reparar)")
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
                 EscribirLogReparador($"[ANALISIS_FALTANTE_TOTAL] PDF='{rutaPdf}' | Pags={pags} | Destino='{carpetaDestinoEsperada}'")
@@ -568,18 +565,15 @@ Public Class FormReparacion
 
             If archivosJpg.Length = 0 Then
                 item.Estado = "📁 Carpeta vacía"
-                ' Priorizar índice en memoria (0 ms), luego BD, y como último recurso leer por red
+                ' Priorizar índice en memoria (0 ms), luego BD
                 Dim pags As Integer = pagsIndice
                 If pags <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
                     pags = infoBd.Paginas
                 End If
-                If pags <= 0 Then
-                    pags = ModuloConversionJpg.ObtenerTotalPaginasPdf(rutaPdf)
-                End If
                 item.PagsEsperadas = pags
                 item.Detalle = If(pags > 0,
                     $"La carpeta existe pero está vacía (0 imágenes JPG generadas). Se reparará con sus {pags} páginas.",
-                    "La carpeta existe pero está vacía y no se pudieron leer las páginas del PDF origen.")
+                    "La carpeta existe pero está vacía. (Se convertirá al reparar)")
                 item.EsIncompletoOFaltante = True
                 item.Seleccionado = True
                 EscribirLogReparador($"[ANALISIS_CARPETA_VACIA] PDF='{rutaPdf}' | Pags={pags} | Destino='{carpetaDestinoEsperada}'")

@@ -284,6 +284,7 @@ Public Module ModuloIndiceOrigen
         Dim errorEscritura As Exception = Nothing
 
         ' Tarea asíncrona de fondo dedicada a escribir en MySQL sin bloquear a los hilos de lectura
+        Dim totalInsertados As Integer = 0
         Dim tareaEscritora = Task.Run(Sub()
             Try
                 Using conn As New MySqlConnection(ModuloConversionJpg.CadenaConexionMysql)
@@ -297,6 +298,10 @@ Public Module ModuloIndiceOrigen
 
                         If lote.Count > 0 Then
                             InsertarLoteConConexion(conn, lote)
+                            totalInsertados += lote.Count
+                            If onProgreso IsNot Nothing Then
+                                onProgreso(totalInsertados, total, $"Guardando inventario en base de datos: {totalInsertados:#,##0} de {total:#,##0}...")
+                            End If
                         ElseIf Not finalizadoLectura Then
                             autoResetEscritor.WaitOne(40)
                         End If
@@ -318,23 +323,14 @@ Public Module ModuloIndiceOrigen
                     .Ruta = fi.FullName,
                     .Nombre = fi.Name,
                     .Tamano = fi.Length,
-                    .FechaMod = fi.LastWriteTime
+                    .FechaMod = fi.LastWriteTime,
+                    .Paginas = 0,
+                    .Estatus = "OK"
                 }
-                Try
-                    fila.Paginas = ModuloConversionJpg.ObtenerTotalPaginasPdf(fi.FullName)
-                Catch
-                    fila.Paginas = 0
-                End Try
-                fila.Estatus = If(fila.Paginas > 0, "OK", "ERROR")
                 cola.Enqueue(fila)
 
                 If cola.Count >= TamanoLote Then
                     autoResetEscritor.Set()
-                End If
-
-                Dim actual = Interlocked.Increment(procesados)
-                If onProgreso IsNot Nothing AndAlso (actual Mod 100 = 0 OrElse actual = total) Then
-                    onProgreso(actual, total, $"Indexando PDFs a máxima potencia ({hilos} núcleos)...")
                 End If
             End Sub)
         Finally
