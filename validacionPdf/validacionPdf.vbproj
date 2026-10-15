@@ -292,6 +292,7 @@
     <Compile Include="Modulos\ModuloRecursos.vb" />
     <Compile Include="Modulos\ModuloBitacoraAsync.vb" />
     <Compile Include="Modulos\ModuloConversionTiff.vb" />
+    <Compile Include="Modulos\ModuloIndiceOrigen.vb" />
     <Compile Include="Formularios\FormReparacion.vb">
       <SubType>Form</SubType>
     </Compile>

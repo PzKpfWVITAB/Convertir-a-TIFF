@@ -4,6 +4,7 @@ Imports System.IO
 Imports System.Net.Http
 Imports System.Text
 Imports System.Threading
+Imports System.Threading.Tasks
 Imports ImageMagick
 Imports iText.Kernel.Pdf
 Imports MySqlConnector
@@ -194,6 +195,7 @@ Public Class FormTransferir
         rutaOrigenActual = ListBoxOrigen.SelectedItem.ToString()
         LabelOrigenRuta.Text = rutaOrigenActual
         CargarCarpetas(rutaOrigenActual, ListViewOrigen)
+        ActualizarResumenIndiceEnUi(rutaOrigenActual)
     End Sub
 
     Private Sub ListBoxDestino_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ListBoxDestino.SelectedIndexChanged
@@ -215,6 +217,133 @@ Public Class FormTransferir
         End If
         LabelOrigenRuta.Text = rutaOrigenActual
         CargarCarpetas(rutaOrigenActual, ListViewOrigen)
+        ActualizarResumenIndiceEnUi(rutaOrigenActual)
+    End Sub
+
+    Private cancelSourceIndexar As CancellationTokenSource = Nothing
+    Private estaIndexando As Boolean = False
+
+    Private Sub ActualizarResumenIndiceEnUi(ruta As String)
+        If String.IsNullOrWhiteSpace(ruta) Then
+            lblResumenIndice.Text = "Índice: Seleccione un origen"
+            lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+            Exit Sub
+        End If
+
+        lblResumenIndice.Text = "Índice: Consultando..."
+        lblResumenIndice.ForeColor = Color.FromArgb(100, 100, 100)
+
+        Task.Run(Sub()
+                     Dim resumen = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+                     Me.BeginInvoke(Sub()
+                                        If rutaOrigenActual = ruta Then
+                                            lblResumenIndice.Text = resumen.ToString()
+                                            If resumen.Existe Then
+                                                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                                            Else
+                                                lblResumenIndice.ForeColor = Color.FromArgb(160, 90, 20)
+                                            End If
+                                        End If
+                                    End Sub)
+                 End Sub)
+    End Sub
+
+    Private Async Sub btnIndexarOrigen_Click(sender As Object, e As EventArgs) Handles btnIndexarOrigen.Click
+        If estaIndexando Then
+            If cancelSourceIndexar IsNot Nothing Then
+                Dim resp = MessageBox.Show("¿Desea cancelar el proceso de indexación en curso?", "Cancelar Indexado", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+                If resp = DialogResult.Yes Then
+                    cancelSourceIndexar.Cancel()
+                    btnIndexarOrigen.Text = "Cancelando..."
+                    btnIndexarOrigen.Enabled = False
+                End If
+            End If
+            Exit Sub
+        End If
+
+        Dim ruta = rutaOrigenActual
+        If String.IsNullOrWhiteSpace(ruta) OrElse Not Directory.Exists(ruta) Then
+            MessageBox.Show("Seleccione una carpeta de origen válida antes de indexar.", "Origen no seleccionado", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            Exit Sub
+        End If
+
+        Dim resumenActual = ModuloIndiceOrigen.ObtenerResumenIndice(ruta)
+        Dim msgPregunta = $"Se creará/reconstruirá el índice de PDFs de origen en la base de datos para la ruta:{vbCrLf}{vbCrLf}" &
+                          $"{ruta}{vbCrLf}{vbCrLf}"
+        If resumenActual.Existe Then
+            msgPregunta &= $"Actualmente hay {resumenActual.TotalPdfs:#,##0} PDFs indexados en esta ubicación.{vbCrLf}" &
+                           "Al continuar, se actualizará el índice de inventario con los archivos actuales.{vbCrLf}{vbCrLf}"
+        Else
+            msgPregunta &= "Esta ubicación no tiene índice registrado todavía.{vbCrLf}{vbCrLf}"
+        End If
+        msgPregunta &= "¿Desea iniciar la indexación ahora?"
+
+        If MessageBox.Show(msgPregunta, "Confirmar Indexado de Origen", MessageBoxButtons.YesNo, MessageBoxIcon.Question) <> DialogResult.Yes Then
+            Exit Sub
+        End If
+
+        estaIndexando = True
+        btnIndexarOrigen.Text = "⏹ Cancelar Indexado"
+        btnTransferir.Enabled = False
+        cancelSourceIndexar = New CancellationTokenSource()
+        Dim token = cancelSourceIndexar.Token
+
+        Dim hilos = ModuloRecursos.ObtenerHilosOptimos()
+        Try
+            Dim resumenFinal As ModuloIndiceOrigen.ResumenIndice = Nothing
+            Await Task.Run(Function()
+                               Return ModuloIndiceOrigen.ReindexarDirectorio(
+                                   ruta,
+                                   hilos,
+                                   token,
+                                   Sub(proc, tot, fase)
+                                       Me.BeginInvoke(Sub()
+                                                          If tot > 0 Then
+                                                              lblResumenIndice.Text = $"{fase} {proc:#,##0}/{tot:#,##0}"
+                                                          Else
+                                                              lblResumenIndice.Text = fase
+                                                          End If
+                                                      End Sub)
+                                   End Sub
+                               )
+                           End Function, token).ContinueWith(Sub(t)
+                                                                 If t.IsFaulted Then
+                                                                     Throw t.Exception.InnerException
+                                                                 ElseIf Not t.IsCanceled Then
+                                                                     resumenFinal = t.Result
+                                                                 End If
+                                                             End Sub)
+
+            If resumenFinal IsNot Nothing Then
+                lblResumenIndice.Text = resumenFinal.ToString()
+                lblResumenIndice.ForeColor = Color.FromArgb(30, 120, 50)
+                Dim msgExito = $"Inventario de PDFs indexado exitosamente:{vbCrLf}{vbCrLf}" &
+                               $"• Total PDFs en inventario: {resumenFinal.TotalPdfs:#,##0}{vbCrLf}" &
+                               $"• Ubicación: {ruta}"
+                If resumenFinal.TotalPaginas > 0 Then
+                    msgExito &= $"{vbCrLf}• Páginas registradas: {resumenFinal.TotalPaginas:#,##0}"
+                End If
+                MessageBox.Show(msgExito, "Índice de Inventario Actualizado", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            End If
+
+        Catch ex As OperationCanceledException
+            lblResumenIndice.Text = "Indexación cancelada por el usuario."
+            lblResumenIndice.ForeColor = Color.FromArgb(160, 40, 40)
+        Catch ex As Exception
+            lblResumenIndice.Text = "Error en indexación: " & ex.Message
+            lblResumenIndice.ForeColor = Color.FromArgb(180, 20, 20)
+            MessageBox.Show("Error durante la indexación: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        Finally
+            estaIndexando = False
+            btnIndexarOrigen.Text = "📑 Indexar Origen"
+            btnIndexarOrigen.Enabled = True
+            btnTransferir.Enabled = True
+            If cancelSourceIndexar IsNot Nothing Then
+                cancelSourceIndexar.Dispose()
+                cancelSourceIndexar = Nothing
+            End If
+            ActualizarResumenIndiceEnUi(rutaOrigenActual)
+        End Try
     End Sub
 
     Private Sub ListViewDestino_DoubleClick(sender As Object, e As EventArgs) Handles ListViewDestino.DoubleClick
@@ -334,8 +463,47 @@ Public Class FormTransferir
         ' RESOLVER DESTINO EFECTIVO CON LA JERARQUÍA OFICIAL DE ENTREGABLES
         Dim destinoEfectivo As String = ResolverDestinoEfectivo(origen, destino)
 
-        Dim dirInfo As New DirectoryInfo(origen)
-        Dim archivos As FileInfo() = dirInfo.EnumerateFiles("*.pdf", SearchOption.AllDirectories).ToArray()
+        ' 1. Cargar el índice de origen primero (O(1) en MySQL en ~10 ms)
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            bgWorker.ReportProgress(0, "STATUS|Consultando índice permanente de origen en base de datos...")
+        End If
+
+        Dim mapaIndiceOrigen As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing
+        Try
+            mapaIndiceOrigen = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
+        Catch
+            mapaIndiceOrigen = Nothing
+        End Try
+
+        ' Cargar también la bitácora completa de la BD en memoria (O(1)) para pre-chequeo instantáneo
+        Dim mapaBdTransfer As Dictionary(Of String, ModuloConversionTiff.InfoRegistroBd) = Nothing
+        Try
+            mapaBdTransfer = ModuloConversionTiff.CargarDiccionarioBitacoraEnMemoria()
+        Catch
+            mapaBdTransfer = Nothing
+        End Try
+
+        ' Obtener dinámicamente hilos óptimos (con 10% libre de reserva: 48 hilos para 54 núcleos)
+        Dim maxHilos As Integer = ModuloRecursos.ObtenerHilosOptimos()
+        Dim cancelToken As CancellationToken = If(cancelSourceTransfer IsNot Nothing, cancelSourceTransfer.Token, CancellationToken.None)
+
+        ' 2. Obtener lista de archivos a procesar:
+        ' Si la carpeta ya está indexada en MySQL, usamos directamente los archivos del índice (0 ms, sin escanear SMB por red)
+        Dim archivos As FileInfo() = Nothing
+        If mapaIndiceOrigen IsNot Nothing AndAlso mapaIndiceOrigen.Count > 0 Then
+            Dim rutasIndexadas = mapaIndiceOrigen.Keys.Where(Function(k) k.Contains(Path.DirectorySeparatorChar) OrElse k.Contains("/"c)).ToList()
+            archivos = rutasIndexadas.Select(Function(r) New FileInfo(r)).ToArray()
+            EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INDICE ORIGEN ACTIVO | Se cargaron {archivos.Length:#,##0} PDFs directamente de la base de datos (0 ms por red SMB).")
+        End If
+
+        ' Si no había índice previo, realizar escaneo en disco/red en paralelo aprovechando todos los núcleos ({maxHilos} hilos)
+        If archivos Is Nothing OrElse archivos.Length = 0 Then
+            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                bgWorker.ReportProgress(0, $"STATUS|Buscando archivos PDF en carpeta de origen a alta velocidad ({maxHilos} núcleos)...")
+            End If
+            archivos = ModuloIndiceOrigen.EnumerarArchivosPdfParalelo(origen, cancelToken, maxHilos)
+        End If
+
         Dim total As Integer = archivos.Length
         Dim procesados As Integer = 0
         Dim delegacionSeleccionada As String = New DirectoryInfo(destinoEfectivo).Name
@@ -344,10 +512,6 @@ Public Class FormTransferir
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | No se encontraron archivos PDF en origen: {origen}")
             Exit Sub
         End If
-
-        ' Obtener dinámicamente hilos óptimos (con 10% libre de reserva)
-        Dim maxHilos As Integer = ModuloRecursos.ObtenerHilosOptimos()
-        Dim cancelToken As CancellationToken = If(cancelSourceTransfer IsNot Nothing, cancelSourceTransfer.Token, CancellationToken.None)
 
         ' VERIFICAR MOTOR EXCLUSIVO MUPDF (OBLIGATORIO)
         Dim rutaMu = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
@@ -371,45 +535,71 @@ Public Class FormTransferir
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
         ' =========================================================================
         If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino...")
+            bgWorker.ReportProgress(0, "STATUS|Iniciando pre-verificación en destino a alta velocidad...")
         End If
+
+        ' Caché concurrente en RAM de subdirectorios existentes por cada carpeta padre en destino.
+        Dim cacheDirectoriosDestino As New ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
 
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
         Dim contadorChequeados As Integer = 0
 
-        Parallel.ForEach(archivos, Sub(archivoInfo, state)
-                                       If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                                           state.Stop()
-                                           Exit Sub
-                                       End If
+        Dim hilosPrechequeo = Math.Max(4, Math.Min(Environment.ProcessorCount * 2, ModuloRecursos.ObtenerHilosRedOptimos()))
+        Dim poptPrechequeo As New ParallelOptions With {
+            .MaxDegreeOfParallelism = hilosPrechequeo,
+            .CancellationToken = cancelToken
+        }
 
-                                       Dim pagsCompletas As Integer = 0
-                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas) Then
-                                           bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
-                                       Else
-                                           bagPendientes.Add(archivoInfo)
-                                       End If
+        Parallel.ForEach(archivos, poptPrechequeo, Sub(archivoInfo, state)
+            If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                state.Stop()
+                Exit Sub
+            End If
 
-                                       Dim actual = Interlocked.Increment(contadorChequeados)
-                                       If (actual Mod 100 = 0 OrElse actual = total) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                                           Dim pct = CInt((actual / Math.Max(1, total)) * 10)
-                                           bgWorker.ReportProgress(pct, $"STATUS|Pre-chequeo: {actual:#,##0}/{total:#,##0} analizados ({bagOmitidos.Count:#,##0} ya listos)")
-                                       End If
-                                   End Sub)
+            Dim pagsCompletas As Integer = 0
+            If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen, mapaBdTransfer) Then
+                bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
+            Else
+                bagPendientes.Add(archivoInfo)
+            End If
+
+            Dim actual = Interlocked.Increment(contadorChequeados)
+            If (actual Mod 100 = 0 OrElse actual = total) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                Dim pct = CInt((actual / Math.Max(1, total)) * 10)
+                bgWorker.ReportProgress(pct, $"STATUS|Pre-chequeo ({hilosPrechequeo} hilos): {actual:#,##0}/{total:#,##0} analizados ({bagOmitidos.Count:#,##0} ya listos)")
+            End If
+        End Sub)
 
         If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
             Exit Sub
         End If
 
+        ' Función rápida para obtener el peso del archivo (del índice en memoria si está disponible, evitando I/O de red)
+        Dim obtenerPesoBytes = Function(f As FileInfo) As Long
+            Dim infoIdx As ModuloIndiceOrigen.InfoIndicePdf = Nothing
+            If mapaIndiceOrigen IsNot Nothing Then
+                If mapaIndiceOrigen.TryGetValue(f.FullName, infoIdx) AndAlso infoIdx.Tamano > 0 Then
+                    Return infoIdx.Tamano
+                ElseIf mapaIndiceOrigen.TryGetValue(f.Name, infoIdx) AndAlso infoIdx.Tamano > 0 Then
+                    Return infoIdx.Tamano
+                End If
+            End If
+            Try
+                Return f.Length
+            Catch
+                Return 0L
+            End Try
+        End Function
+
         ' ORDENAR ESTRICTAMENTE DESCENDENTE POR PESO ORIGINAL DEL PDF (MÁS PESADOS PRIMERO, MENOS PESADOS AL FINAL)
-        Dim listaPendientes = bagPendientes.OrderByDescending(Function(f) f.Length).ToList()
+        Dim listaPendientes = bagPendientes.OrderByDescending(Function(f) obtenerPesoBytes(f)).ToList()
         Dim listaOmitidos = bagOmitidos.ToList()
         Dim totalOmitidos = listaOmitidos.Count
         Dim totalPendientes = listaPendientes.Count
 
-        Dim pesoMaxMB = If(totalPendientes > 0, (listaPendientes.First().Length / (1024.0 * 1024.0)), 0)
-        Dim pesoMinMB = If(totalPendientes > 0, (listaPendientes.Last().Length / (1024.0 * 1024.0)), 0)
+        Dim pesoMaxMB = If(totalPendientes > 0, (obtenerPesoBytes(listaPendientes.First()) / (1024.0 * 1024.0)), 0)
+        Dim pesoMinMB = If(totalPendientes > 0, (obtenerPesoBytes(listaPendientes.Last()) / (1024.0 * 1024.0)), 0)
 
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | PRE-CHEQUEO FINALIZADO | Total: {total} | Ya completos (omitidos): {totalOmitidos} | Pendientes por procesar: {totalPendientes} (Rango peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín)")
 
@@ -442,99 +632,115 @@ Public Class FormTransferir
             bgWorker.ReportProgress(10, $"COMIENZO DE CONVERSIÓN | {totalPendientes:#,##0} pendientes (Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín)")
         End If
 
-        ' Segmentación dual por peso:
-        ' 1. PDFs Grandes (> 30 MB): Procesados secuencialmente a nivel de documento,
-        '    pero utilizando los 100 hilos concurrentes para sus páginas (Protección total de disco local).
-        ' 2. PDFs Pequeños (<= 30 MB): Procesados a nivel de documento con 100 hilos concurrentes.
+        ' =========================================================================
+        ' PIPELINE CONTINUO DINÁMICO MULTIHILO (CERO BARRERAS / CERO HILOS PEREZOSOS)
+        ' =========================================================================
+        ' Regla de Oro:
+        ' 1. PDFs Grandes (> 30 MB): Máximo 20 documentos concurrentes en vuelo (protección de RAM/staging).
+        ' 2. Capacidad Total: Hasta maxHilos (48+ hilos en servidores de 54 núcleos / 1 hilo por núcleo).
+        ' 3. CERO ESPERAS: Si un hilo termina un archivo (pesado o ligero), toma INMEDIATAMENTE el siguiente
+        '    disponible de la cola en 0 ms. No espera bloques ni espera a que otros hilos terminen.
+        ' 4. Transición fluida: Los núcleos no utilizados por archivos pesados procesan archivos ligeros
+        '    simultáneamente. Conforme terminan los pesados, los hilos se suman a los ligeros al instante.
+        ' =========================================================================
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
-        Dim listaGrandes = listaPendientes.Where(Function(f) f.Length > limiteGrandeBytes).ToList()
-        Dim listaPequenos = listaPendientes.Where(Function(f) f.Length <= limiteGrandeBytes).ToList()
+        Dim colaGrandes As New ConcurrentQueue(Of FileInfo)(listaPendientes.Where(Function(f) obtenerPesoBytes(f) > limiteGrandeBytes))
+        Dim colaPequenos As New ConcurrentQueue(Of FileInfo)(listaPendientes.Where(Function(f) obtenerPesoBytes(f) <= limiteGrandeBytes))
 
-        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | DISTRIBUCIÓN DINÁMICA | Total: {totalPendientes} | Grandes (> 30 MB): {listaGrandes.Count} | Pequeños (<= 30 MB): {listaPequenos.Count}")
+        Dim totalGrandes = colaGrandes.Count
+        Dim totalPequenos = colaPequenos.Count
+        Dim maxGrandesEnParalelo As Integer = Math.Max(1, Math.Min(20, maxHilos))
+        Dim hilosEncodingPorDocGrande As Integer = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ maxGrandesEnParalelo)))
 
-        ' =========================================================================
-        ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
-        ' =========================================================================
-        If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            Dim hilosGrandes = Math.Max(4, Math.Min(24, CInt(Math.Floor(Environment.ProcessorCount * 0.38))))
-            Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Environment.ProcessorCount \ hilosGrandes))
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | PIPELINE DINÁMICO ACTIVO | Total pendientes: {totalPendientes} | Grandes (>30MB): {totalGrandes} (Tope simultáneo: {maxGrandesEnParalelo}) | Ligeros: {totalPequenos} | Hilos de trabajo: {maxHilos} (1 por núcleo)")
 
-            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes ({Environment.ProcessorCount} núcleos detectados)")
-            End If
-
-            Dim optionsGrandes As New ParallelOptions With {
-                .MaxDegreeOfParallelism = hilosGrandes,
-                .CancellationToken = cancelToken
-            }
-
-            Try
-                Dim particionadorGrandes = Partitioner.Create(listaGrandes, EnumerablePartitionerOptions.NoBuffering)
-                Parallel.ForEach(particionadorGrandes, optionsGrandes, Sub(fileInfo, loopState, loopIndex)
-                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                        loopState.Stop()
-                        Exit Sub
-                    End If
-
-                    Dim paginas As Integer = 0
-                    Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
-                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
-
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                        Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                        bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande ({hilosGrandes} en paralelo): {nombreSinExt} ({pesoMB:0.1} MB)")
-                    End If
-
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, hilosEncodingPorDoc, paginas)
-                    Dim actualProcesados = Interlocked.Increment(procesados)
-                    Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
-
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
-                        bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs [MuPDF -P] - {actualProcesados}/{totalPendientes})")
-                    End If
-                End Sub)
-            Catch ex As OperationCanceledException
-            End Try
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            bgWorker.ReportProgress(10, $"PIPELINE DINÁMICO ACTIVO | {totalGrandes} pesados (máx {maxGrandesEnParalelo} simultáneos) + {totalPequenos} ligeros a {maxHilos} hilos (0 esperas)")
         End If
 
-        ' =========================================================================
-        ' FASE 2: PDFs PEQUEÑOS (<= 30 MB) — 100 HILOS CONCURRENTES A NIVEL DE ARCHIVO
-        ' =========================================================================
-        If listaPequenos.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                bgWorker.ReportProgress(pctActual, $"FASE 2: PDFs PEQUEÑOS | {listaPequenos.Count} archivos (<= 30 MB) a {maxHilos} hilos concurrentes")
-            End If
+        Dim grandesEnVuelo As Integer = 0
+        Dim lockerCola As New Object()
+        Dim tareasConsumidoras As New List(Of Task)()
 
-            Dim options As New ParallelOptions With {
-                .MaxDegreeOfParallelism = maxHilos,
-                .CancellationToken = cancelToken
-            }
+        Try
+            For h As Integer = 1 To maxHilos
+                tareasConsumidoras.Add(Task.Run(Sub()
+                    While Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested
+                        Dim fileAProcesar As FileInfo = Nothing
+                        Dim esGrande As Boolean = False
 
-            Try
-                Dim particionador = Partitioner.Create(listaPequenos, EnumerablePartitionerOptions.NoBuffering)
-                Parallel.ForEach(particionador, options, Sub(fileInfo, loopState, loopIndex)
-                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                        loopState.Stop()
-                        Exit Sub
-                    End If
+                        SyncLock lockerCola
+                            While Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested
+                                ' Condición A: No queda ningún trabajo pendiente en ninguna cola
+                                If colaGrandes.IsEmpty AndAlso colaPequenos.IsEmpty Then
+                                    Exit While
+                                End If
 
-                    Dim paginas As Integer = 0
-                    Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
-                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
+                                ' Condición B: Hay archivos grandes y no hemos alcanzado el tope de 20
+                                If grandesEnVuelo < maxGrandesEnParalelo AndAlso colaGrandes.TryDequeue(fileAProcesar) Then
+                                    grandesEnVuelo += 1
+                                    esGrande = True
+                                    Exit While
+                                End If
 
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, False, 1, paginas)
-                    Dim actualProcesados = Interlocked.Increment(procesados)
-                    Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+                                ' Condición C: Tomar archivo ligero si hay disponible
+                                If colaPequenos.TryDequeue(fileAProcesar) Then
+                                    esGrande = False
+                                    Exit While
+                                End If
 
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
-                        bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs - {actualProcesados}/{totalPendientes})")
-                    End If
-                End Sub)
-            Catch ex As OperationCanceledException
-                ' Manejo normal de cancelación del bucle paralelo
-            End Try
-        End If
+                                ' Condición D: Si quedan archivos grandes pero ya hay 20 en vuelo y la cola pequeña está vacía,
+                                ' esperar a que se libere un slot de archivo grande (máximo 50ms)
+                                Monitor.Wait(lockerCola, 50)
+                            End While
+                        End SyncLock
+
+                        ' Si no se obtuvo archivo, significa que ya no hay pendientes en ninguna cola
+                        If fileAProcesar Is Nothing Then
+                            Exit While
+                        End If
+
+                        ' Procesamiento inmediato sin esperas
+                        Try
+                            If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                                Exit While
+                            End If
+
+                            Dim paginas As Integer = 0
+                            Dim pesoMB As Double = fileAProcesar.Length / (1024.0 * 1024.0)
+                            Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileAProcesar.FullName)
+
+                            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                                Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
+                                Dim etiquetaTipo = If(esGrande, $"PDF Grande [{grandesEnVuelo}/{maxGrandesEnParalelo}]", $"PDF Estándar [{maxHilos} hilos]")
+                                bgWorker.ReportProgress(pctActual, $"STATUS|Procesando {etiquetaTipo}: {nombreSinExt} ({pesoMB:0.1} MB)")
+                            End If
+
+                            Dim hilosDoc = If(esGrande, hilosEncodingPorDocGrande, 1)
+                            Dim estatus = ProcesarUnArchivoPdf(fileAProcesar, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, esGrande, hilosDoc, paginas)
+                            Dim actualProcesados = Interlocked.Increment(procesados)
+                            Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+
+                            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
+                                bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs - {actualProcesados}/{totalPendientes})")
+                            End If
+                        Finally
+                            If esGrande Then
+                                SyncLock lockerCola
+                                    grandesEnVuelo -= 1
+                                    Monitor.PulseAll(lockerCola)
+                                End SyncLock
+                            End If
+                        End Try
+                    End While
+                End Sub))
+            Next
+
+            Task.WaitAll(tareasConsumidoras.ToArray())
+        Catch exOp As OperationCanceledException
+        Catch exGen As Exception
+            EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | ERROR PIPELINE | {exGen.Message}")
+        End Try
 
         ' Si hubo cancelación, barrer y asegurar limpieza de cualquier archivo que estuviera en vuelo
         If canceladoPorUsuario Then
@@ -589,8 +795,7 @@ Public Class FormTransferir
                 anioEncontrado = matchAnio.Value
             End If
 
-            ' CONVERSIÓN: EXCLUSIVAMENTE CON MUPDF (VELOCIDAD EXTREMA: 30-50 PÁGS/S)
-            ' Prohibido terminantemente el uso de Ghostscript o motores obsoletos
+            ' CONVERSIÓN: EXCLUSIVAMENTE CON MUPDF A TIFF (250 DPI LZW, ESCALA DE GRISES)
             Dim rutaMu = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
             If String.IsNullOrEmpty(rutaMu) OrElse Not File.Exists(rutaMu) Then
                 ModuloRecursos.AsegurarMuPdfInstalado()
@@ -610,7 +815,7 @@ Public Class FormTransferir
                 Return "CANCELADO"
             End If
 
-            ' VERIFICACIÓN FÍSICA RÁPIDA DE INTEGRIDAD Y NÚMERO DE PÁGINAS
+            ' VERIFICACIÓN FÍSICA RÁPIDA DE INTEGRIDAD Y NÚMERO DE PÁGINAS TIFF
             Dim errorVerificacion As String = ""
             Dim esValidoFisicamente = ValidarIntegridadFisicaTiff(carpetaPdfDestino, nombreSinExt, paginas, errorVerificacion)
 
@@ -661,7 +866,6 @@ Public Class FormTransferir
                 estatusFinal = "CANCELADO"
                 Return "CANCELADO"
             End If
-            estatusFinal = "ERROR"
             Dim detalleError As String = ex.Message
             If TypeOf ex Is AggregateException Then
                 Dim agg = DirectCast(ex, AggregateException).Flatten()
@@ -669,6 +873,7 @@ Public Class FormTransferir
             ElseIf ex.InnerException IsNot Nothing Then
                 detalleError &= " -> " & ex.InnerException.GetType().Name & ": " & ex.InnerException.Message
             End If
+            estatusFinal = "ERROR: " & detalleError
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | ERROR | {nombreSinExt} | {detalleError}")
         Finally
             Dim dummy As String = Nothing
@@ -679,26 +884,7 @@ Public Class FormTransferir
     End Function
 
     ''' <summary>
-    ''' Comprueba de forma no bloqueante si un archivo está completamente escrito y cerrado en disco.
-    ''' </summary>
-    Private Function EsArchivoListoParaLectura(rutaArchivo As String) As Boolean
-        Try
-            If Not File.Exists(rutaArchivo) Then Return False
-            Dim fi As New FileInfo(rutaArchivo)
-            If fi.Length < 32 Then Return False
-            Using fs As New FileStream(rutaArchivo, FileMode.Open, FileAccess.Read, FileShare.None)
-                Return fs.Length >= 32
-            End Using
-        Catch
-            Return False
-        End Try
-    End Function
-
-    ''' <summary>
-    ''' Motor de conversión de velocidad extrema basado en MuPDF (mutool.exe):
-    ''' 1. Rasterizado ultrarrápido con mutool draw a escala de grises a 250 DPI.
-    ''' 2. Compresión multihilo concurrente a TIFF LZW a 250 DPI en tiempo real.
-    ''' 3. Eliminación inmediata al vuelo de imágenes temporales para garantizar 0 saturación de disco duro.
+    ''' Motor de conversión a TIFF basado en MuPDF (mutool.exe) y Magick.NET.
     ''' </summary>
     Private Sub ConvertirPdfTiffMuPdf(
         pdfPath As String,
@@ -709,358 +895,55 @@ Public Class FormTransferir
         Optional procesarPaginasEnParalelo As Boolean = False,
         Optional hilosParalelos As Integer = 1
     )
-        If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
-
-        Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
-        If String.IsNullOrEmpty(muExe) OrElse Not File.Exists(muExe) Then
-            Throw New FileNotFoundException("No se encontró el ejecutable de MuPDF (mutool.exe) en el sistema.")
-        End If
-
-        If Not File.Exists(pdfPath) Then
-            Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
-        End If
-
-        ' Asegurar carpeta destino físicamente en almacenamiento
-        SyncLock locker
-            If Not Directory.Exists(carpetaDestino) Then
-                Directory.CreateDirectory(carpetaDestino)
-            End If
-        End SyncLock
-
-        Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
-        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "mu_" & Guid.NewGuid().ToString("N"))
-        Directory.CreateDirectory(stagingCarpeta)
-
-        Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
+        Dim callbackProgreso As Action(Of Integer, String) = Nothing
         Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
-        Dim procId As Integer = 0
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            callbackProgreso = Sub(pct, texto)
+                                   bgWorker.ReportProgress(pct, $"STATUS|{texto} ({pesoMB:0.1} MB)")
+                               End Sub
+        End If
 
-        Try
-            If token.IsCancellationRequested OrElse canceladoPorUsuario Then Throw New OperationCanceledException()
-
-            ' Patrón de imagen temporal de mutool draw: p_1.png, p_2.png...
-            Dim patronSalidaPng = Path.Combine(stagingCarpeta, "p_%d.png")
-
-            Dim args As New StringBuilder()
-            args.Append("draw ")
-            args.Append("-q ")
-            args.Append("-P ")
-            args.Append("-r 250 ")
-            args.Append("-c gray ")
-            args.Append($"-o ""{patronSalidaPng}"" ")
-            args.Append($"""{pdfPath}""")
-
-            Dim psi As New ProcessStartInfo With {
-                .FileName = muExe,
-                .Arguments = args.ToString(),
-                .UseShellExecute = False,
-                .CreateNoWindow = True,
-                .RedirectStandardError = True,
-                .RedirectStandardOutput = False
-            }
-
-            Dim paginasCodificadas As Integer = 0
-            Dim paginasEncontradas As New HashSet(Of Integer)()
-            Dim lockerPaginas As New Object()
-
-            Dim codificarPngATiff = Sub(pngFile As String)
-                If token.IsCancellationRequested OrElse canceladoPorUsuario Then Exit Sub
-
-                Dim nomSinExt = Path.GetFileNameWithoutExtension(pngFile)
-                Dim partes = nomSinExt.Split("_"c)
-                If partes.Length >= 2 Then
-                    Dim numPag As Integer = 0
-                    If Integer.TryParse(partes(1), numPag) Then
-                        SyncLock lockerPaginas
-                            If paginasEncontradas.Contains(numPag) Then Exit Sub
-                            paginasEncontradas.Add(numPag)
-                        End SyncLock
-
-                        Dim tiffDestino = Path.Combine(carpetaDestino, $"{nombreBase}_{numPag}.tiff")
-
-                        Using img As New MagickImage(pngFile)
-                            img.Format = MagickFormat.Tiff
-                            img.Settings.Compression = CompressionMethod.LZW
-                            img.ColorSpace = ColorSpace.Gray
-                            img.Density = New Density(250, 250)
-                            img.Alpha(AlphaOption.Remove)
-                            img.Write(tiffDestino)
-                        End Using
-
-                        ' BORRADO INMEDIATO DE LA IMAGEN TEMPORAL PARA CUIDAR EL DISCO
-                        Try
-                            File.Delete(pngFile)
-                        Catch
-                        End Try
-
-                        Dim compl = Interlocked.Increment(paginasCodificadas)
-                        If (compl Mod 10 = 0 OrElse compl = paginasEsperadas) AndAlso bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                            Dim pct = If(paginasEsperadas > 0, CInt(Math.Min(100, (compl / CDbl(paginasEsperadas)) * 100)), 50)
-                            Dim totalStr = If(paginasEsperadas > 0, paginasEsperadas.ToString("#,##0"), "?")
-                            bgWorker.ReportProgress(pct, $"STATUS|{nombreBase} ({pesoMB:0.1} MB): {compl:#,##0}/{totalStr} págs [MuPDF Pipeline]")
-                        End If
-                    End If
-                End If
-            End Sub
-
-            Using proc As New Process()
-                proc.StartInfo = psi
-                Dim stderrOutput As New StringBuilder()
-
-                AddHandler proc.ErrorDataReceived, Sub(s, e)
-                    If Not String.IsNullOrEmpty(e.Data) Then
-                        stderrOutput.AppendLine(e.Data)
-                    End If
-                End Sub
-
-                proc.Start()
-                procId = proc.Id
-                ProcesosActivos.TryAdd(procId, proc)
-                proc.BeginErrorReadLine()
-
-                ' Soporte de cancelación inmediata
-                Using reg = token.Register(Sub()
-                    Try
-                        If Not proc.HasExited Then proc.Kill()
-                    Catch
-                    End Try
-                End Sub)
-
-                    ' Bucle de consumo concurrente en tiempo real mientras mutool renderiza en paralelo
-                    While Not proc.WaitForExit(75)
-                        If token.IsCancellationRequested OrElse canceladoPorUsuario Then
-                            Try
-                                If Not proc.HasExited Then proc.Kill()
-                            Catch
-                            End Try
-                            Throw New OperationCanceledException()
-                        End If
-
-                        ' Buscar PNGs listos generados por mutool y codificarlos a TIFF LZW en paralelo
-                        Try
-                            Dim archivosPng = Directory.GetFiles(stagingCarpeta, "p_*.png")
-                            If archivosPng.Length > 0 Then
-                                Dim listos = archivosPng.Where(AddressOf EsArchivoListoParaLectura).ToList()
-                                If listos.Count > 0 Then
-                                    Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
-                                    Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                                    Parallel.ForEach(listos, popt, codificarPngATiff)
-                                End If
-                            End If
-                        Catch
-                        End Try
-                    End While
-
-                End Using
-
-                If token.IsCancellationRequested OrElse canceladoPorUsuario Then
-                    Throw New OperationCanceledException()
-                End If
-
-                If proc.ExitCode <> 0 Then
-                    Dim errStr = stderrOutput.ToString().Trim()
-                    Throw New IOException($"MuPDF finalizó con código de salida {proc.ExitCode}: {errStr}")
-                End If
-            End Using
-
-            ' Barrido final para procesar los últimos PNGs que mutool generó justo antes de terminar
-            Dim ultimosPng = Directory.GetFiles(stagingCarpeta, "p_*.png")
-            If ultimosPng.Length > 0 Then
-                Dim numHilosEncoding = Math.Max(2, Math.Min(Environment.ProcessorCount, hilosParalelos))
-                Dim popt As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosEncoding, .CancellationToken = token}
-                Parallel.ForEach(ultimosPng, popt, codificarPngATiff)
-            End If
-
-            ' Validar archivos TIFF finales directamente en la carpeta destino
-            Dim tiffGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.tiff")
-            If tiffGenerados.Length = 0 Then
-                Throw New IOException("MuPDF completó la ejecución pero no se generaron archivos TIFF válidos en destino.")
-            End If
-
-            totalPaginas = tiffGenerados.Length
-
-        Catch ex As OperationCanceledException
-            LimpiarCarpetaIncompleta(carpetaDestino)
-            Throw
-        Catch ex As Exception
-            LimpiarCarpetaIncompleta(carpetaDestino)
-            Throw
-        Finally
-            Dim dummyProc As Process = Nothing
-            Try
-                If procId > 0 Then ProcesosActivos.TryRemove(procId, dummyProc)
-            Catch
-            End Try
-            Try
-                If Directory.Exists(stagingCarpeta) Then
-                    Directory.Delete(stagingCarpeta, True)
-                End If
-            Catch
-            End Try
-        End Try
+        ModuloConversionTiff.ConvertirPdfTiffMuPdf(
+            pdfPath,
+            carpetaDestino,
+            nombreBase,
+            totalPaginas,
+            token,
+            procesarPaginasEnParalelo,
+            hilosParalelos,
+            callbackProgreso,
+            ProcesosActivos
+        )
     End Sub
 
-    ''' <summary>
-    ''' Obtiene rápidamente el número total de páginas de un PDF sin descomprimirlo en RAM.
-    ''' Utiliza iText 7 como método principal (lectura de trailer/catálogo en ~0.5ms) con fallback a ImageMagick Ping.
-    ''' </summary>
     Private Function ObtenerTotalPaginasPdf(rutaPdf As String) As Integer
-        Try
-            Using reader As New PdfReader(rutaPdf)
-                Using doc As New PdfDocument(reader)
-                    Return doc.GetNumberOfPages()
-                End Using
-            End Using
-        Catch
-            Try
-                Using col As New MagickImageCollection()
-                    col.Ping(rutaPdf)
-                    Return col.Count
-                End Using
-            Catch
-                Return 0
-            End Try
-        End Try
+        Return ModuloConversionTiff.ObtenerTotalPaginasPdf(rutaPdf)
     End Function
 
     ''' <summary>
-    ''' Verifica de forma rápida y física si un archivo PDF ya fue transferido y completado al 100% en el destino:
-    ''' 1. Comprueba si existe la carpeta del PDF en el directorio destino.
-    ''' 2. Comprueba que contenga archivos TIFF.
-    ''' 3. Ejecuta la validación física rápida de páginas y cabecera mágica (sin páginas faltantes ni corruptas).
+    ''' Verifica de forma rápida y física si un archivo PDF ya fue transferido y completado al 100% en el destino en TIFF a 250 DPI.
     ''' </summary>
-    Private Function EstaPdfYaProcesadoYCompleto(origenBase As String, destinoBase As String, archivoPdf As String, ByRef totalPaginas As Integer) As Boolean
-        Try
-            Dim rutaRelativaArchivo = ObtenerRutaRelativa(origenBase, archivoPdf)
-            Dim directorioRelativo = NormalizarRutaRelativa(Path.GetDirectoryName(rutaRelativaArchivo))
-            Dim destinoDirectorioFinal = Path.Combine(destinoBase, directorioRelativo)
-            Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
-            Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
-
-            If Not Directory.Exists(carpetaPdfDestino) Then
-                Return False
-            End If
-
-            ' Si la carpeta destino existe, verificar si tiene archivos TIFF físicos
-            Dim archivosTiff = Directory.GetFiles(carpetaPdfDestino, "*.tiff")
-            If archivosTiff.Length = 0 Then
-                Return False
-            End If
-
-            ' Obtener las páginas del PDF original para comparar conteo exacto
-            Dim paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
-            If paginasEsperadas <= 0 Then
-                Return False
-            End If
-
-            totalPaginas = paginasEsperadas
-
-            ' Ejecutar la verificación física de integridad y cantidad exacta
-            Dim dummyError As String = ""
-            If ValidarIntegridadFisicaTiff(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError) Then
-                Return True
-            End If
-
-            Return False
-        Catch ex As Exception
-            Return False
-        End Try
+    Private Function EstaPdfYaProcesadoYCompleto(
+        origenBase As String,
+        destinoBase As String,
+        archivoPdf As String,
+        ByRef totalPaginas As Integer,
+        Optional cacheDirectoriosDestino As ConcurrentDictionary(Of String, Lazy(Of HashSet(Of String))) = Nothing,
+        Optional mapaIndice As Dictionary(Of String, ModuloIndiceOrigen.InfoIndicePdf) = Nothing,
+        Optional mapaBd As Dictionary(Of String, ModuloConversionTiff.InfoRegistroBd) = Nothing
+    ) As Boolean
+        Return ModuloConversionTiff.EstaPdfYaProcesadoYCompletoTiff(origenBase, destinoBase, archivoPdf, totalPaginas, cacheDirectoriosDestino, mapaIndice, mapaBd)
     End Function
 
     ''' <summary>
-    ''' Realiza una verificación física rápida y exhaustiva en disco para garantizar:
-    ''' 1. Que la carpeta destino exista.
-    ''' 2. Que el conteo físico de archivos TIFF coincida exactamente con las páginas esperadas (sin páginas faltantes ni de más).
-    ''' 3. Que cada archivo consecutivo ({nombreBase}_{i}.tiff) exista físicamente en disco.
-    ''' 4. Que ningún archivo esté vacío o incompleto (tamaño > 0 y cabecera mínima >= 16 bytes).
-    ''' 5. Que la cabecera mágica corresponda a un archivo TIFF 6.0 estándar ("II*" little-endian o "MM*" big-endian).
-    ''' 6. Que la imagen sea completamente legible (validación rápida de metadatos MagickImageInfo sin decodificar píxeles).
+    ''' Realiza una verificación física rápida de integridad para archivos TIFF.
     ''' </summary>
     Private Function ValidarIntegridadFisicaTiff(carpetaDestino As String, nombreBase As String, totalPaginasEsperadas As Integer, ByRef mensajeError As String) As Boolean
-        Try
-            If Not Directory.Exists(carpetaDestino) Then
-                mensajeError = "La carpeta de destino no existe físicamente en el almacenamiento."
-                Return False
-            End If
-
-            If totalPaginasEsperadas <= 0 Then
-                mensajeError = "El número de páginas esperadas es 0 o inválido."
-                Return False
-            End If
-
-            ' 1. Obtener todos los archivos TIFF en la carpeta destino
-            Dim archivosTiff = Directory.GetFiles(carpetaDestino, "*.tiff")
-
-            ' 2. Validación estricta de cantidad: no pueden haber menos páginas ni archivos sobrantes
-            If archivosTiff.Length <> totalPaginasEsperadas Then
-                mensajeError = $"Discrepancia en páginas físicas: se esperaban {totalPaginasEsperadas} páginas pero hay {archivosTiff.Length} archivos TIFF en disco."
-                Return False
-            End If
-
-            ' 3. Validación archivo por archivo de cada página esperada
-            For i As Integer = 1 To totalPaginasEsperadas
-                Dim archivoEsperado = Path.Combine(carpetaDestino, $"{nombreBase}_{i}.tiff")
-
-                If Not File.Exists(archivoEsperado) Then
-                    mensajeError = $"Falta la página física requerida: {nombreBase}_{i}.tiff"
-                    Return False
-                End If
-
-                Dim fi As New FileInfo(archivoEsperado)
-                If fi.Length < 16 Then
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está dañado o vacío (tamaño: {fi.Length} bytes)."
-                    Return False
-                End If
-
-                ' 4. Verificación ultrarrápida de Magic Bytes TIFF (TIFF 6.0: II* o MM*)
-                Using fs As New FileStream(archivoEsperado, FileMode.Open, FileAccess.Read, FileShare.Read)
-                    Dim header(3) As Byte
-                    Dim leidos = fs.Read(header, 0, 4)
-                    If leidos < 4 Then
-                        mensajeError = $"No se pudo leer la cabecera del archivo {Path.GetFileName(archivoEsperado)}."
-                        Return False
-                    End If
-
-                    Dim esLittleEndian = (header(0) = &H49 AndAlso header(1) = &H49 AndAlso header(2) = &H2A AndAlso header(3) = &H0)
-                    Dim esBigEndian = (header(0) = &H4D AndAlso header(1) = &H4D AndAlso header(2) = &H0 AndAlso header(3) = &H2A)
-
-                    If Not esLittleEndian AndAlso Not esBigEndian Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} no contiene una cabecera TIFF válida (archivo corrupto)."
-                        Return False
-                    End If
-                End Using
-
-                ' 5. Validación rápida de estructura de imagen con ImageMagick (Ping de metadatos sin descomprimir píxeles)
-                Try
-                    Dim info As New MagickImageInfo(archivoEsperado)
-                    If info.Width <= 0 OrElse info.Height <= 0 OrElse info.Format <> MagickFormat.Tiff Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} tiene dimensiones o formato TIFF inválidos ({info.Width}x{info.Height})."
-                        Return False
-                    End If
-                Catch exMagick As Exception
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está dañado e ilegible: {exMagick.Message}"
-                    Return False
-                End Try
-            Next
-
-            mensajeError = ""
-            Return True
-
-        Catch ex As Exception
-            mensajeError = "Excepción durante la verificación física de archivos: " & ex.Message
-            Return False
-        End Try
+        Return ModuloConversionTiff.ValidarIntegridadDiagnosticoRapidoTiff(carpetaDestino, nombreBase, totalPaginasEsperadas, mensajeError)
     End Function
 
     Private Sub LimpiarCarpetaIncompleta(carpeta As String)
-        Try
-            If Not String.IsNullOrEmpty(carpeta) AndAlso Directory.Exists(carpeta) Then
-                Directory.Delete(carpeta, True)
-                EscribirLog($"LIMPIEZA | Eliminada carpeta incompleta: {carpeta}")
-            End If
-        Catch ex As Exception
-            Debug.WriteLine("Error al limpiar carpeta incompleta: " & ex.Message)
-        End Try
+        ModuloConversionTiff.LimpiarCarpetaIncompleta(carpeta)
     End Sub
 
     Private Sub LimpiarTodosLosIncompletosEnVuelo()
@@ -1071,18 +954,7 @@ Public Class FormTransferir
     End Sub
 
     Private Function ObtenerRutaRelativa(basePath As String, fullPath As String) As String
-        Try
-            If Not basePath.EndsWith("\") Then
-                basePath &= "\"
-            End If
-            Dim uriBase As New Uri(basePath)
-            Dim uriFull As New Uri(fullPath)
-            Dim relativeUri As Uri = uriBase.MakeRelativeUri(uriFull)
-            Dim relativePath As String = Uri.UnescapeDataString(relativeUri.ToString())
-            Return relativePath.Replace("/"c, "\"c)
-        Catch ex As Exception
-            Return fullPath.Replace(basePath, "").TrimStart("\"c)
-        End Try
+        Return ModuloConversionTiff.ObtenerRutaRelativa(basePath, fullPath)
     End Function
 
     ''' <summary>
@@ -1091,61 +963,21 @@ Public Class FormTransferir
     ''' sin duplicar carpetas si el usuario ya la seleccionó manualmente en el destino.
     ''' </summary>
     Private Function ResolverDestinoEfectivo(origen As String, destino As String) As String
-        Try
-            If String.IsNullOrWhiteSpace(origen) OrElse String.IsNullOrWhiteSpace(destino) Then
-                Return destino
-            End If
-
-            Dim nombreOrigen = Path.GetFileName(origen.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Trim()
-            Dim subCarpetaDestino = nombreOrigen
-
-            ' Normalizar variantes como "ENTREGA 3", "ENTREGA_3", "ENTREGA3" a "ENTREGABLE 3"
-            Dim mEntrega = System.Text.RegularExpressions.Regex.Match(nombreOrigen, "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            If mEntrega.Success Then
-                subCarpetaDestino = "ENTREGABLE " & mEntrega.Groups(1).Value.Trim()
-            End If
-
-            Dim nombreDestino = Path.GetFileName(destino.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Trim()
-
-            ' Si el destino ya termina en la carpeta esperada (ej: Z:\...\ENTREGABLE 3 o Z:\...\ENTREGA 3), no duplicar
-            If nombreDestino.Equals(subCarpetaDestino, StringComparison.OrdinalIgnoreCase) OrElse
-               nombreDestino.Equals(nombreOrigen, StringComparison.OrdinalIgnoreCase) Then
-                Return destino
-            End If
-
-            ' Si el origen corresponde a un entregable ("ENTREGA X" o "ENTREGABLE X"), anexarlo al destino
-            Dim esEntregable = mEntrega.Success OrElse System.Text.RegularExpressions.Regex.IsMatch(nombreOrigen, "^ENTREGABLE[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            If esEntregable Then
-                Return Path.Combine(destino, subCarpetaDestino)
-            End If
-
-            Return destino
-        Catch ex As Exception
-            Return destino
-        End Try
+        Return ModuloConversionTiff.ResolverDestinoEfectivo(origen, destino)
     End Function
 
     ''' <summary>
     ''' Normaliza cualquier nivel de carpeta 'ENTREGA X' en la ruta relativa a la convención oficial 'ENTREGABLE X'.
     ''' </summary>
     Private Function NormalizarRutaRelativa(directorioRelativo As String) As String
-        If String.IsNullOrWhiteSpace(directorioRelativo) Then Return ""
-
-        Dim partes = directorioRelativo.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.None)
-        For i As Integer = 0 To partes.Length - 1
-            Dim m = System.Text.RegularExpressions.Regex.Match(partes(i).Trim(), "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            If m.Success Then
-                partes(i) = "ENTREGABLE " & m.Groups(1).Value.Trim()
-            End If
-        Next
-        Return Path.Combine(partes)
+        Return ModuloConversionTiff.NormalizarRutaRelativa(directorioRelativo)
     End Function
 
     Private Sub bgWorker_ProgressChanged(sender As Object, e As ProgressChangedEventArgs) Handles bgWorker.ProgressChanged
         If e.UserState IsNot Nothing Then
             Dim str = e.UserState.ToString()
             If str.StartsWith("STATUS|") Then
-                Me.Text = "Transferir a TIFF — " & str.Substring(7)
+                Me.Text = "Transferir a TIFF (250 DPI) — " & str.Substring(7)
             ElseIf str.Contains("|") Then
                 Dim partes = str.Split("|"c)
                 dgvBitacora.Rows.Add(partes(0).Trim(), partes(1).Trim())
@@ -1163,7 +995,7 @@ Public Class FormTransferir
 
     Private Sub EscribirLog(mensaje As String)
         Try
-            Dim rutaLog As String = "C:\LogsTIFF"
+            Dim rutaLog As String = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StellumLogs")
             If Not Directory.Exists(rutaLog) Then
                 Directory.CreateDirectory(rutaLog)
             End If

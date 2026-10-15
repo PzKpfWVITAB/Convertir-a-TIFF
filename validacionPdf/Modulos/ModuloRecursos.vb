@@ -127,6 +127,18 @@ Public Module ModuloRecursos
         Return CalcularHilosOptimos(cfg.PorcentajeMargenLibre)
     End Function
 
+    ''' <summary>
+    ''' Obtiene el número óptimo y seguro de hilos concurrentes para operaciones de red (SMB / compartidos),
+    ''' previniendo la saturación del redirector de red de Windows (Win32 Error 1450 / Recursos insuficientes).
+    ''' </summary>
+    Public Function ObtenerHilosRedOptimos() As Integer
+        Dim cfg = ObtenerConfiguracion()
+        If Not cfg.ModoAutomatico AndAlso cfg.HilosRedConcurrente > 0 Then
+            Return Math.Max(2, Math.Min(Environment.ProcessorCount, cfg.HilosRedConcurrente))
+        End If
+        Return ObtenerHilosOptimos()
+    End Function
+
     Private Function CalcularHilosOptimos(margenLibrePct As Integer) As Integer
         Dim totalProcesadores = Environment.ProcessorCount
         Dim factorUso = (100.0 - Math.Max(5, Math.Min(50, margenLibrePct))) / 100.0

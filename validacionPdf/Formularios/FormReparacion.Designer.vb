@@ -21,6 +21,7 @@ Partial Class FormReparacion
         Dim dataGridViewCellStyle1 As System.Windows.Forms.DataGridViewCellStyle = New System.Windows.Forms.DataGridViewCellStyle()
         Dim dataGridViewCellStyle2 As System.Windows.Forms.DataGridViewCellStyle = New System.Windows.Forms.DataGridViewCellStyle()
         Me.panelSuperior = New System.Windows.Forms.Panel()
+        Me.lblResumenIndice = New System.Windows.Forms.Label()
         Me.lblEstadoBd = New System.Windows.Forms.Label()
         Me.btnAbrirDestino = New System.Windows.Forms.Button()
         Me.btnExaminarDestino = New System.Windows.Forms.Button()
@@ -31,6 +32,7 @@ Partial Class FormReparacion
         Me.txtOrigen = New System.Windows.Forms.TextBox()
         Me.lblOrigen = New System.Windows.Forms.Label()
         Me.panelBotones = New System.Windows.Forms.Panel()
+        Me.btnIndexarOrigen = New System.Windows.Forms.Button()
         Me.chkSoloIncompletos = New System.Windows.Forms.CheckBox()
         Me.btnDetener = New System.Windows.Forms.Button()
         Me.btnReparar = New System.Windows.Forms.Button()
@@ -66,6 +68,7 @@ Partial Class FormReparacion
         '
         Me.panelSuperior.BackColor = System.Drawing.Color.FromArgb(CType(CType(245, Byte), Integer), CType(CType(247, Byte), Integer), CType(CType(250, Byte), Integer))
         Me.panelSuperior.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle
+        Me.panelSuperior.Controls.Add(Me.lblResumenIndice)
         Me.panelSuperior.Controls.Add(Me.lblEstadoBd)
         Me.panelSuperior.Controls.Add(Me.btnAbrirDestino)
         Me.panelSuperior.Controls.Add(Me.btnExaminarDestino)
@@ -78,8 +81,19 @@ Partial Class FormReparacion
         Me.panelSuperior.Dock = System.Windows.Forms.DockStyle.Top
         Me.panelSuperior.Location = New System.Drawing.Point(0, 0)
         Me.panelSuperior.Name = "panelSuperior"
-        Me.panelSuperior.Size = New System.Drawing.Size(1200, 105)
+        Me.panelSuperior.Size = New System.Drawing.Size(1200, 125)
         Me.panelSuperior.TabIndex = 0
+        '
+        'lblResumenIndice
+        '
+        Me.lblResumenIndice.AutoSize = True
+        Me.lblResumenIndice.Font = New System.Drawing.Font("Segoe UI", 9.0!)
+        Me.lblResumenIndice.ForeColor = System.Drawing.Color.FromArgb(CType(CType(20, Byte), Integer), CType(CType(70, Byte), Integer), CType(CType(140, Byte), Integer))
+        Me.lblResumenIndice.Location = New System.Drawing.Point(140, 96)
+        Me.lblResumenIndice.Name = "lblResumenIndice"
+        Me.lblResumenIndice.Size = New System.Drawing.Size(260, 20)
+        Me.lblResumenIndice.TabIndex = 9
+        Me.lblResumenIndice.Text = "Índice: Seleccione una carpeta de origen"
         '
         'lblEstadoBd
         '
@@ -186,10 +200,11 @@ Partial Class FormReparacion
         Me.panelBotones.BackColor = System.Drawing.Color.White
         Me.panelBotones.Controls.Add(Me.chkSoloIncompletos)
         Me.panelBotones.Controls.Add(Me.btnDetener)
+        Me.panelBotones.Controls.Add(Me.btnIndexarOrigen)
         Me.panelBotones.Controls.Add(Me.btnReparar)
         Me.panelBotones.Controls.Add(Me.btnAnalizar)
         Me.panelBotones.Dock = System.Windows.Forms.DockStyle.Top
-        Me.panelBotones.Location = New System.Drawing.Point(0, 105)
+        Me.panelBotones.Location = New System.Drawing.Point(0, 125)
         Me.panelBotones.Name = "panelBotones"
         Me.panelBotones.Size = New System.Drawing.Size(1200, 60)
         Me.panelBotones.TabIndex = 1
@@ -200,7 +215,7 @@ Partial Class FormReparacion
         Me.chkSoloIncompletos.Checked = True
         Me.chkSoloIncompletos.CheckState = System.Windows.Forms.CheckState.Checked
         Me.chkSoloIncompletos.Font = New System.Drawing.Font("Segoe UI", 9.5!)
-        Me.chkSoloIncompletos.Location = New System.Drawing.Point(620, 18)
+        Me.chkSoloIncompletos.Location = New System.Drawing.Point(735, 18)
         Me.chkSoloIncompletos.Name = "chkSoloIncompletos"
         Me.chkSoloIncompletos.Size = New System.Drawing.Size(340, 25)
         Me.chkSoloIncompletos.TabIndex = 3
@@ -213,12 +228,24 @@ Partial Class FormReparacion
         Me.btnDetener.Enabled = False
         Me.btnDetener.Font = New System.Drawing.Font("Segoe UI", 9.5!, System.Drawing.FontStyle.Bold)
         Me.btnDetener.ForeColor = System.Drawing.Color.Firebrick
-        Me.btnDetener.Location = New System.Drawing.Point(490, 10)
+        Me.btnDetener.Location = New System.Drawing.Point(615, 10)
         Me.btnDetener.Name = "btnDetener"
-        Me.btnDetener.Size = New System.Drawing.Size(110, 40)
+        Me.btnDetener.Size = New System.Drawing.Size(105, 40)
         Me.btnDetener.TabIndex = 2
         Me.btnDetener.Text = "⏹ Detener"
         Me.btnDetener.UseVisualStyleBackColor = False
+        '
+        'btnIndexarOrigen
+        '
+        Me.btnIndexarOrigen.BackColor = System.Drawing.Color.FromArgb(CType(CType(245, Byte), Integer), CType(CType(245, Byte), Integer), CType(CType(245, Byte), Integer))
+        Me.btnIndexarOrigen.Font = New System.Drawing.Font("Segoe UI", 9.5!, System.Drawing.FontStyle.Bold)
+        Me.btnIndexarOrigen.ForeColor = System.Drawing.Color.FromArgb(CType(CType(20, Byte), Integer), CType(CType(60, Byte), Integer), CType(CType(120, Byte), Integer))
+        Me.btnIndexarOrigen.Location = New System.Drawing.Point(435, 10)
+        Me.btnIndexarOrigen.Name = "btnIndexarOrigen"
+        Me.btnIndexarOrigen.Size = New System.Drawing.Size(170, 40)
+        Me.btnIndexarOrigen.TabIndex = 4
+        Me.btnIndexarOrigen.Text = "📑 Indexar Origen"
+        Me.btnIndexarOrigen.UseVisualStyleBackColor = False
         '
         'btnReparar
         '
@@ -226,9 +253,9 @@ Partial Class FormReparacion
         Me.btnReparar.Enabled = False
         Me.btnReparar.Font = New System.Drawing.Font("Segoe UI", 10.0!, System.Drawing.FontStyle.Bold)
         Me.btnReparar.ForeColor = System.Drawing.Color.White
-        Me.btnReparar.Location = New System.Drawing.Point(230, 10)
+        Me.btnReparar.Location = New System.Drawing.Point(205, 10)
         Me.btnReparar.Name = "btnReparar"
-        Me.btnReparar.Size = New System.Drawing.Size(250, 40)
+        Me.btnReparar.Size = New System.Drawing.Size(220, 40)
         Me.btnReparar.TabIndex = 1
         Me.btnReparar.Text = "🛠️ Reparar Incompletos"
         Me.btnReparar.UseVisualStyleBackColor = False
@@ -240,7 +267,7 @@ Partial Class FormReparacion
         Me.btnAnalizar.ForeColor = System.Drawing.Color.White
         Me.btnAnalizar.Location = New System.Drawing.Point(15, 10)
         Me.btnAnalizar.Name = "btnAnalizar"
-        Me.btnAnalizar.Size = New System.Drawing.Size(200, 40)
+        Me.btnAnalizar.Size = New System.Drawing.Size(180, 40)
         Me.btnAnalizar.TabIndex = 0
         Me.btnAnalizar.Text = "🔍 1. Analizar Faltantes"
         Me.btnAnalizar.UseVisualStyleBackColor = False
@@ -272,7 +299,7 @@ Partial Class FormReparacion
         Me.dgvArchivos.DefaultCellStyle = dataGridViewCellStyle2
         Me.dgvArchivos.Dock = System.Windows.Forms.DockStyle.Fill
         Me.dgvArchivos.EnableHeadersVisualStyles = False
-        Me.dgvArchivos.Location = New System.Drawing.Point(0, 165)
+        Me.dgvArchivos.Location = New System.Drawing.Point(0, 185)
         Me.dgvArchivos.Name = "dgvArchivos"
         Me.dgvArchivos.RowHeadersVisible = False
         Me.dgvArchivos.RowHeadersWidth = 30
@@ -490,4 +517,6 @@ Partial Class FormReparacion
     Friend WithEvents ColCarpetaDestino As DataGridViewTextBoxColumn
     Friend WithEvents ColCarpetaOrigen As DataGridViewTextBoxColumn
     Friend WithEvents ColDetalle As DataGridViewTextBoxColumn
+    Friend WithEvents btnIndexarOrigen As Button
+    Friend WithEvents lblResumenIndice As Label
 End Class
