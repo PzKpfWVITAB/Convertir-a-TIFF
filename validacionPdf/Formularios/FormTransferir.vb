@@ -622,98 +622,115 @@ Public Class FormTransferir
             bgWorker.ReportProgress(10, $"COMIENZO DE CONVERSIÓN | {totalPendientes:#,##0} pendientes (Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín)")
         End If
 
-        ' Segmentación dual por peso:
-        ' 1. PDFs Grandes (> 30 MB): Hasta 20 documentos concurrentes en paralelo con multihilo de encoding por documento.
-        ' 2. PDFs Pequeños (<= 30 MB): Procesados a nivel de documento con máxima potencia de núcleos (hasta 48+ hilos concurrentes).
+        ' =========================================================================
+        ' PIPELINE CONTINUO DINÁMICO MULTIHILO (CERO BARRERAS / CERO HILOS PEREZOSOS)
+        ' =========================================================================
+        ' Regla de Oro:
+        ' 1. PDFs Grandes (> 30 MB): Máximo 20 documentos concurrentes en vuelo (protección de RAM/staging).
+        ' 2. Capacidad Total: Hasta maxHilos (48+ hilos en servidores de 54 núcleos / 1 hilo por núcleo).
+        ' 3. CERO ESPERAS: Si un hilo termina un archivo (pesado o ligero), toma INMEDIATAMENTE el siguiente
+        '    disponible de la cola en 0 ms. No espera bloques ni espera a que otros hilos terminen.
+        ' 4. Transición fluida: Los núcleos no utilizados por archivos pesados procesan archivos ligeros
+        '    simultáneamente. Conforme terminan los pesados, los hilos se suman a los ligeros al instante.
+        ' =========================================================================
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
-        Dim listaGrandes = listaPendientes.Where(Function(f) obtenerPesoBytes(f) > limiteGrandeBytes).ToList()
-        Dim listaPequenos = listaPendientes.Where(Function(f) obtenerPesoBytes(f) <= limiteGrandeBytes).ToList()
+        Dim colaGrandes As New ConcurrentQueue(Of FileInfo)(listaPendientes.Where(Function(f) obtenerPesoBytes(f) > limiteGrandeBytes))
+        Dim colaPequenos As New ConcurrentQueue(Of FileInfo)(listaPendientes.Where(Function(f) obtenerPesoBytes(f) <= limiteGrandeBytes))
 
-        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | DISTRIBUCIÓN DINÁMICA | Total: {totalPendientes} | Grandes (> 30 MB): {listaGrandes.Count} | Pequeños (<= 30 MB): {listaPequenos.Count}")
+        Dim totalGrandes = colaGrandes.Count
+        Dim totalPequenos = colaPequenos.Count
+        Dim maxGrandesEnParalelo As Integer = Math.Max(1, Math.Min(20, maxHilos))
+        Dim hilosEncodingPorDocGrande As Integer = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ maxGrandesEnParalelo)))
 
-        ' =========================================================================
-        ' FASE 1: PDFs GRANDES (> 30 MB) — MULTIHILO CONCURRENTE (MuPDF -P MULTINÚCLEO)
-        ' =========================================================================
-        If listaGrandes.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            Dim hilosGrandes = Math.Max(1, Math.Min(20, maxHilos))
-            Dim hilosEncodingPorDoc = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ hilosGrandes)))
+        EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | PIPELINE DINÁMICO ACTIVO | Total pendientes: {totalPendientes} | Grandes (>30MB): {totalGrandes} (Tope simultáneo: {maxGrandesEnParalelo}) | Ligeros: {totalPequenos} | Hilos de trabajo: {maxHilos} (1 por núcleo)")
 
-            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                bgWorker.ReportProgress(10, $"FASE 1: PDFs GRANDES | {listaGrandes.Count} archivos (> 30 MB) a {hilosGrandes} documentos concurrentes ({Environment.ProcessorCount} núcleos detectados)")
-            End If
-
-            Dim optionsGrandes As New ParallelOptions With {
-                .MaxDegreeOfParallelism = hilosGrandes,
-                .CancellationToken = cancelToken
-            }
-
-            Try
-                Dim particionadorGrandes = Partitioner.Create(listaGrandes, EnumerablePartitionerOptions.NoBuffering)
-                Parallel.ForEach(particionadorGrandes, optionsGrandes, Sub(fileInfo, loopState, loopIndex)
-                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                        loopState.Stop()
-                        Exit Sub
-                    End If
-
-                    Dim paginas As Integer = 0
-                    Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
-                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
-
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                        Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                        bgWorker.ReportProgress(pctActual, $"STATUS|Procesando PDF Grande ({hilosGrandes} en paralelo): {nombreSinExt} ({pesoMB:0.1} MB)")
-                    End If
-
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, True, hilosEncodingPorDoc, paginas)
-                    Dim actualProcesados = Interlocked.Increment(procesados)
-                    Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
-
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
-                        bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs [MuPDF -P] - {actualProcesados}/{totalPendientes})")
-                    End If
-                End Sub)
-            Catch ex As OperationCanceledException
-            End Try
+        If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+            bgWorker.ReportProgress(10, $"PIPELINE DINÁMICO ACTIVO | {totalGrandes} pesados (máx {maxGrandesEnParalelo} simultáneos) + {totalPequenos} ligeros a {maxHilos} hilos (0 esperas)")
         End If
 
-        ' =========================================================================
-        ' FASE 2: PDFs PEQUEÑOS (<= 30 MB) — 100 HILOS CONCURRENTES A NIVEL DE ARCHIVO
-        ' =========================================================================
-        If listaPequenos.Count > 0 AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
-                bgWorker.ReportProgress(pctActual, $"FASE 2: PDFs PEQUEÑOS | {listaPequenos.Count} archivos (<= 30 MB) a {maxHilos} hilos concurrentes")
-            End If
+        Dim grandesEnVuelo As Integer = 0
+        Dim lockerCola As New Object()
+        Dim tareasConsumidoras As New List(Of Task)()
 
-            Dim options As New ParallelOptions With {
-                .MaxDegreeOfParallelism = maxHilos,
-                .CancellationToken = cancelToken
-            }
+        Try
+            For h As Integer = 1 To maxHilos
+                tareasConsumidoras.Add(Task.Run(Sub()
+                    While Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested
+                        Dim fileAProcesar As FileInfo = Nothing
+                        Dim esGrande As Boolean = False
 
-            Try
-                Dim particionador = Partitioner.Create(listaPequenos, EnumerablePartitionerOptions.NoBuffering)
-                Parallel.ForEach(particionador, options, Sub(fileInfo, loopState, loopIndex)
-                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
-                        loopState.Stop()
-                        Exit Sub
-                    End If
+                        SyncLock lockerCola
+                            While Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested
+                                ' Condición A: No queda ningún trabajo pendiente en ninguna cola
+                                If colaGrandes.IsEmpty AndAlso colaPequenos.IsEmpty Then
+                                    Exit While
+                                End If
 
-                    Dim paginas As Integer = 0
-                    Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
-                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileInfo.FullName)
+                                ' Condición B: Hay archivos grandes y no hemos alcanzado el tope de 20
+                                If grandesEnVuelo < maxGrandesEnParalelo AndAlso colaGrandes.TryDequeue(fileAProcesar) Then
+                                    grandesEnVuelo += 1
+                                    esGrande = True
+                                    Exit While
+                                End If
 
-                    Dim estatus = ProcesarUnArchivoPdf(fileInfo, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, False, 1, paginas)
-                    Dim actualProcesados = Interlocked.Increment(procesados)
-                    Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+                                ' Condición C: Tomar archivo ligero si hay disponible
+                                If colaPequenos.TryDequeue(fileAProcesar) Then
+                                    esGrande = False
+                                    Exit While
+                                End If
 
-                    If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
-                        bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs - {actualProcesados}/{totalPendientes})")
-                    End If
-                End Sub)
-            Catch ex As OperationCanceledException
-                ' Manejo normal de cancelación del bucle paralelo
-            End Try
-        End If
+                                ' Condición D: Si quedan archivos grandes pero ya hay 20 en vuelo y la cola pequeña está vacía,
+                                ' esperar a que se libere un slot de archivo grande (máximo 50ms)
+                                Monitor.Wait(lockerCola, 50)
+                            End While
+                        End SyncLock
+
+                        ' Si no se obtuvo archivo, significa que ya no hay pendientes en ninguna cola
+                        If fileAProcesar Is Nothing Then
+                            Exit While
+                        End If
+
+                        ' Procesamiento inmediato sin esperas
+                        Try
+                            If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                                Exit While
+                            End If
+
+                            Dim paginas As Integer = 0
+                            Dim pesoMB As Double = fileAProcesar.Length / (1024.0 * 1024.0)
+                            Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileAProcesar.FullName)
+
+                            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
+                                Dim pctActual = CInt(10 + ((procesados / Math.Max(1, totalPendientes)) * 90))
+                                Dim etiquetaTipo = If(esGrande, $"PDF Grande [{grandesEnVuelo}/{maxGrandesEnParalelo}]", $"PDF Estándar [{maxHilos} hilos]")
+                                bgWorker.ReportProgress(pctActual, $"STATUS|Procesando {etiquetaTipo}: {nombreSinExt} ({pesoMB:0.1} MB)")
+                            End If
+
+                            Dim hilosDoc = If(esGrande, hilosEncodingPorDocGrande, 1)
+                            Dim estatus = ProcesarUnArchivoPdf(fileAProcesar, origen, destinoEfectivo, delegacionSeleccionada, cancelToken, esGrande, hilosDoc, paginas)
+                            Dim actualProcesados = Interlocked.Increment(procesados)
+                            Dim porcentaje = CInt(10 + ((actualProcesados / Math.Max(1, totalPendientes)) * 90))
+
+                            If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress AndAlso Not canceladoPorUsuario Then
+                                bgWorker.ReportProgress(porcentaje, $"{nombreSinExt} | {estatus} ({pesoMB:0.1} MB - {paginas} págs - {actualProcesados}/{totalPendientes})")
+                            End If
+                        Finally
+                            If esGrande Then
+                                SyncLock lockerCola
+                                    grandesEnVuelo -= 1
+                                    Monitor.PulseAll(lockerCola)
+                                End SyncLock
+                            End If
+                        End Try
+                    End While
+                End Sub))
+            Next
+
+            Task.WaitAll(tareasConsumidoras.ToArray())
+        Catch exOp As OperationCanceledException
+        Catch exGen As Exception
+            EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | ERROR PIPELINE | {exGen.Message}")
+        End Try
 
         ' Si hubo cancelación, barrer y asegurar limpieza de cualquier archivo que estuviera en vuelo
         If canceladoPorUsuario Then

@@ -701,16 +701,19 @@ Public Class FormReparacion
 
         Dim maxHilos = ModuloRecursos.ObtenerHilosOptimos()
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
-        Dim listaGrandes = aReparar.Where(Function(i) i.TamanoBytes > limiteGrandeBytes).ToList()
-        Dim listaPequenos = aReparar.Where(Function(i) i.TamanoBytes <= limiteGrandeBytes).ToList()
-        Dim hilosGrandes = Math.Max(1, Math.Min(20, maxHilos))
+        Dim colaGrandes As New ConcurrentQueue(Of ItemDiagnostico)(aReparar.Where(Function(i) i.TamanoBytes > limiteGrandeBytes))
+        Dim colaPequenos As New ConcurrentQueue(Of ItemDiagnostico)(aReparar.Where(Function(i) i.TamanoBytes <= limiteGrandeBytes))
 
-        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} (Grandes >30MB: {listaGrandes.Count} a {hilosGrandes} en paralelo | Ligeros <=30MB: {listaPequenos.Count} a {maxHilos} en paralelo [1 por núcleo]). Ordenados por peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín.")
+        Dim totalGrandes = colaGrandes.Count
+        Dim totalPequenos = colaPequenos.Count
+        Dim maxGrandesEnParalelo = Math.Max(1, Math.Min(20, maxHilos))
+
+        EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} (Grandes >30MB: {totalGrandes} [tope simultáneo {maxGrandesEnParalelo}] | Ligeros <=30MB: {totalPequenos} [hasta {maxHilos} hilos / 1 por núcleo]). CERO ESPERAS.")
 
         Try
             Await Task.Run(Sub()
-                               Dim procesarItem = Sub(item As ItemDiagnostico, state As ParallelLoopState)
-                                   If token.IsCancellationRequested Then state.Stop() : Exit Sub
+                               Dim procesarItem = Sub(item As ItemDiagnostico)
+                                   If token.IsCancellationRequested Then Exit Sub
 
                                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(item.Documento)
                                    Dim carpetaDestino = item.CarpetaDestino
@@ -807,23 +810,54 @@ Public Class FormReparacion
                                                   End Sub)
                                End Sub
 
-                               ' FASE 1: PDFs GRANDES (> 30 MB) — Hasta 20 archivos en paralelo
-                               If listaGrandes.Count > 0 AndAlso Not token.IsCancellationRequested Then
-                                   Dim poptGrandes As New ParallelOptions With {
-                                       .MaxDegreeOfParallelism = hilosGrandes,
-                                       .CancellationToken = token
-                                   }
-                                   Parallel.ForEach(listaGrandes, poptGrandes, procesarItem)
-                               End If
+                               Dim grandesEnVuelo As Integer = 0
+                               Dim lockerCola As New Object()
+                               Dim tareasConsumidoras As New List(Of Task)()
 
-                               ' FASE 2: PDFs LIGEROS (<= 30 MB) — Uno por cada núcleo (máx potencia)
-                               If listaPequenos.Count > 0 AndAlso Not token.IsCancellationRequested Then
-                                   Dim poptPequenos As New ParallelOptions With {
-                                       .MaxDegreeOfParallelism = maxHilos,
-                                       .CancellationToken = token
-                                   }
-                                   Parallel.ForEach(listaPequenos, poptPequenos, procesarItem)
-                               End If
+                               For h As Integer = 1 To maxHilos
+                                   tareasConsumidoras.Add(Task.Run(Sub()
+                                       While Not token.IsCancellationRequested
+                                           Dim itemAProcesar As ItemDiagnostico = Nothing
+                                           Dim esGrande As Boolean = False
+
+                                           SyncLock lockerCola
+                                               While Not token.IsCancellationRequested
+                                                   If colaGrandes.IsEmpty AndAlso colaPequenos.IsEmpty Then
+                                                       Exit While
+                                                   End If
+
+                                                   If grandesEnVuelo < maxGrandesEnParalelo AndAlso colaGrandes.TryDequeue(itemAProcesar) Then
+                                                       grandesEnVuelo += 1
+                                                       esGrande = True
+                                                       Exit While
+                                                   End If
+
+                                                   If colaPequenos.TryDequeue(itemAProcesar) Then
+                                                       esGrande = False
+                                                       Exit While
+                                                   End If
+
+                                                   Monitor.Wait(lockerCola, 50)
+                                               End While
+                                           End SyncLock
+
+                                           If itemAProcesar Is Nothing Then Exit While
+
+                                           Try
+                                               procesarItem(itemAProcesar)
+                                           Finally
+                                               If esGrande Then
+                                                   SyncLock lockerCola
+                                                       grandesEnVuelo -= 1
+                                                       Monitor.PulseAll(lockerCola)
+                                                   End SyncLock
+                                               End If
+                                           End Try
+                                       End While
+                                   End Sub, token))
+                               Next
+
+                               Task.WaitAll(tareasConsumidoras.ToArray())
                            End Sub, token)
 
             ActualizarVistaGrilla()
