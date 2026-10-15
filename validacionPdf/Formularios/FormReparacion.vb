@@ -278,9 +278,25 @@ Public Class FormReparacion
 
         Try
             Await Task.Run(Sub()
-                               ' 1. Obtener todos los archivos PDF en origen
-                               Me.BeginInvoke(Sub() lblStatus.Text = "Buscando archivos PDF en la carpeta de origen...")
-                               Dim archivosPdf = Directory.EnumerateFiles(origen, "*.pdf", SearchOption.AllDirectories).ToArray()
+                               ' 1. Cargar la base de datos completa y el índice en memoria en UN SOLO VIAJE (O(1))
+                               Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice y base de datos en memoria para máxima velocidad...")
+                               Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+                               Dim mapaIndice = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
+                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
+
+                               ' 2. Obtener lista de archivos PDF en origen (del índice en memoria si existe, o escaneo paralelo a 48 núcleos)
+                               Dim archivosPdf As String() = Nothing
+                               If mapaIndice IsNot Nothing AndAlso mapaIndice.Count > 0 Then
+                                   archivosPdf = mapaIndice.Keys.Where(Function(k) k.Contains(Path.DirectorySeparatorChar) OrElse k.Contains("/"c)).ToArray()
+                                   EscribirLogReparador($"[INDICE_ACTIVO] Se cargaron {archivosPdf.Length:#,##0} PDFs directamente de la base de datos (0 ms por red SMB).")
+                               End If
+
+                               If archivosPdf Is Nothing OrElse archivosPdf.Length = 0 Then
+                                   Me.BeginInvoke(Sub() lblStatus.Text = $"Buscando archivos PDF en el origen a alta velocidad ({numHilos} núcleos)...")
+                                   Dim fis = ModuloIndiceOrigen.EnumerarArchivosPdfParalelo(origen, token, numHilos)
+                                   archivosPdf = fis.Select(Function(f) f.FullName).ToArray()
+                               End If
+
                                Dim total = archivosPdf.Length
 
                                If total = 0 Then
@@ -291,13 +307,7 @@ Public Class FormReparacion
                                    Exit Sub
                                End If
 
-                               ' 2. Cargar la base de datos completa en memoria en UN SOLO VIAJE (O(1))
-                               Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice de base de datos en memoria para máxima velocidad...")
-                               Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
-                               Dim mapaIndice = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
-
                                ' 3. Análisis masivo multinúcleo concurrente
-                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
                                EscribirLogReparador($"[INICIO_ANALISIS] Origen='{origen}' | Destino='{destinoEfectivo}' | TotalPDFs={total:#,##0} | Hilos={numHilos} | RegistrosEnBD={If(mapaBd IsNot Nothing, mapaBd.Count, 0):#,##0}")
 
                                Dim contadorProgreso As Integer = 0
@@ -367,6 +377,7 @@ Public Class FormReparacion
 
                                    If registrosBd IsNot Nothing AndAlso registrosBd.Count > 0 Then
                                        ' A. Detección de Duplicados en BD
+                                       Dim idsBdAgregados As New HashSet(Of Long)()
                                        Dim grupos = registrosBd.GroupBy(Function(r) If(Not String.IsNullOrEmpty(r.Documento), r.Documento, r.NombreOriginal), StringComparer.OrdinalIgnoreCase).
                                                                 Where(Function(g) Not String.IsNullOrEmpty(g.Key))
 
@@ -375,6 +386,7 @@ Public Class FormReparacion
                                                Dim ordenados = g.OrderByDescending(Function(r) If(r.Estatus = "OK", 1, 0)).ThenByDescending(Function(r) r.Id).ToList()
                                                Dim idValido = ordenados.First().Id
                                                For Each dup In ordenados.Skip(1)
+                                                   idsBdAgregados.Add(dup.Id)
                                                    Dim itemDup As New ItemDiagnostico With {
                                                        .IdBd = dup.Id,
                                                        .Documento = dup.Documento,
@@ -415,8 +427,8 @@ Public Class FormReparacion
 
                                            If Not existeFisico Then
                                                Dim idReg = reg.Id
-                                               Dim yaAgregado = bagItems.Any(Function(it) it.IdBd = idReg)
-                                               If Not yaAgregado Then
+                                               If Not idsBdAgregados.Contains(idReg) Then
+                                                   idsBdAgregados.Add(idReg)
                                                    Dim itemHuerfano As New ItemDiagnostico With {
                                                        .IdBd = reg.Id,
                                                        .Documento = reg.Documento,

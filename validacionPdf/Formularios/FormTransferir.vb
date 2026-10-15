@@ -472,6 +472,18 @@ Public Class FormTransferir
             mapaIndiceOrigen = Nothing
         End Try
 
+        ' Cargar también la bitácora completa de la BD en memoria (O(1)) para pre-chequeo instantáneo
+        Dim mapaBdTransfer As Dictionary(Of String, ModuloConversionJpg.InfoRegistroBd) = Nothing
+        Try
+            mapaBdTransfer = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+        Catch
+            mapaBdTransfer = Nothing
+        End Try
+
+        ' Obtener dinámicamente hilos óptimos (con 10% libre de reserva: 48 hilos para 54 núcleos)
+        Dim maxHilos As Integer = ModuloRecursos.ObtenerHilosOptimos()
+        Dim cancelToken As CancellationToken = If(cancelSourceTransfer IsNot Nothing, cancelSourceTransfer.Token, CancellationToken.None)
+
         ' 2. Obtener lista de archivos a procesar:
         ' Si la carpeta ya está indexada en MySQL, usamos directamente los archivos del índice (0 ms, sin escanear SMB por red)
         Dim archivos As FileInfo() = Nothing
@@ -481,13 +493,12 @@ Public Class FormTransferir
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INDICE ORIGEN ACTIVO | Se cargaron {archivos.Length:#,##0} PDFs directamente de la base de datos (0 ms por red SMB).")
         End If
 
-        ' Si no había índice previo, realizar escaneo en disco/red como fallback
+        ' Si no había índice previo, realizar escaneo en disco/red en paralelo aprovechando todos los núcleos ({maxHilos} hilos)
         If archivos Is Nothing OrElse archivos.Length = 0 Then
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
-                bgWorker.ReportProgress(0, "STATUS|Buscando archivos PDF en carpeta de origen...")
+                bgWorker.ReportProgress(0, $"STATUS|Buscando archivos PDF en carpeta de origen a alta velocidad ({maxHilos} núcleos)...")
             End If
-            Dim dirInfo As New DirectoryInfo(origen)
-            archivos = dirInfo.EnumerateFiles("*.pdf", SearchOption.AllDirectories).ToArray()
+            archivos = ModuloIndiceOrigen.EnumerarArchivosPdfParalelo(origen, cancelToken, maxHilos)
         End If
 
         Dim total As Integer = archivos.Length
@@ -498,10 +509,6 @@ Public Class FormTransferir
             EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | No se encontraron archivos PDF en origen: {origen}")
             Exit Sub
         End If
-
-        ' Obtener dinámicamente hilos óptimos (con 10% libre de reserva)
-        Dim maxHilos As Integer = ModuloRecursos.ObtenerHilosOptimos()
-        Dim cancelToken As CancellationToken = If(cancelSourceTransfer IsNot Nothing, cancelSourceTransfer.Token, CancellationToken.None)
 
         ' VERIFICAR MOTOR EXCLUSIVO MUPDF (OBLIGATORIO)
         Dim rutaMu = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
@@ -548,7 +555,7 @@ Public Class FormTransferir
                                                        End If
 
                                                        Dim pagsCompletas As Integer = 0
-                                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen) Then
+                                                       If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen, mapaBdTransfer) Then
                                                            bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
                                                        Else
                                                            bagPendientes.Add(archivoInfo)

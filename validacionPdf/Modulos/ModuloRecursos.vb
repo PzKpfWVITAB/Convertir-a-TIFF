@@ -134,9 +134,9 @@ Public Module ModuloRecursos
     Public Function ObtenerHilosRedOptimos() As Integer
         Dim cfg = ObtenerConfiguracion()
         If Not cfg.ModoAutomatico AndAlso cfg.HilosRedConcurrente > 0 Then
-            Return Math.Max(2, Math.Min(16, cfg.HilosRedConcurrente))
+            Return Math.Max(2, Math.Min(Environment.ProcessorCount, cfg.HilosRedConcurrente))
         End If
-        Return Math.Max(2, Math.Min(10, Environment.ProcessorCount))
+        Return ObtenerHilosOptimos()
     End Function
 
     Private Function CalcularHilosOptimos(margenLibrePct As Integer) As Integer
