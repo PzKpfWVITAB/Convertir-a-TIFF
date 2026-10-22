@@ -580,7 +580,7 @@ Public Class FormReparacion
 
         If item.TamanoBytes <= 0 Then
             Try
-                Dim fi As New FileInfo(rutaPdf)
+                Dim fi As New FileInfo(ModuloConversionTiff.APrefijoRutaLarga(rutaPdf))
                 If fi.Exists Then item.TamanoBytes = fi.Length
             Catch
             End Try
@@ -606,8 +606,9 @@ Public Class FormReparacion
                 item.EnBd = "No"
             End If
 
-            ' 2. Inspección rápida de disco en destino
-            If Not Directory.Exists(carpetaDestinoEsperada) Then
+            ' 2. Inspección rápida de disco en destino (con soporte Win32 para rutas largas > 260 caracteres)
+            Dim carpetaDestinoIo = ModuloConversionTiff.APrefijoRutaLarga(carpetaDestinoEsperada)
+            If Not Directory.Exists(carpetaDestinoIo) Then
                 item.Estado = "❌ Faltante total"
                 item.JpgsFisicos = 0
                 ' Priorizar índice en memoria (0 ms), luego BD
@@ -625,7 +626,7 @@ Public Class FormReparacion
                 Return item
             End If
 
-            Dim archivosTiff = Directory.GetFiles(carpetaDestinoEsperada, "*.tiff")
+            Dim archivosTiff = Directory.GetFiles(carpetaDestinoIo, "*.tiff")
             item.JpgsFisicos = archivosTiff.Length
 
             If archivosTiff.Length = 0 Then
@@ -813,7 +814,7 @@ Public Class FormReparacion
             .OrderByDescending(Function(it)
                                    If it.TamanoBytes > 0 Then Return it.TamanoBytes
                                    Try
-                                       Dim fi As New FileInfo(it.RutaPdf)
+                                       Dim fi As New FileInfo(ModuloConversionTiff.APrefijoRutaLarga(it.RutaPdf))
                                        If fi.Exists Then
                                            it.TamanoBytes = fi.Length
                                            Return it.TamanoBytes

@@ -10,6 +10,13 @@ Public Module Program
 
     <STAThread>
     Public Sub Main(args As String())
+        ' 0. Habilitar soporte nativo de rutas largas (> 260 caracteres MAX_PATH) en .NET y Win32
+        Try
+            AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", False)
+            AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", False)
+        Catch
+        End Try
+
         ' 1. Inicializar diagnóstico inmediatamente en la primera línea de ejecución
         ModuloDiagnostico.InicializarDiagnostico()
         ModuloDiagnostico.Log("================================================================================")
