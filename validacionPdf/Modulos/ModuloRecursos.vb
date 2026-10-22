@@ -1,4 +1,4 @@
-Imports System.IO
+﻿Imports System.IO
 Imports System.IO.Compression
 Imports System.Threading
 Imports System.Windows.Forms
@@ -137,6 +137,14 @@ Public Module ModuloRecursos
             Return Math.Max(2, Math.Min(Environment.ProcessorCount, cfg.HilosRedConcurrente))
         End If
         Return ObtenerHilosOptimos()
+    End Function
+
+    ''' <summary>
+    ''' Calcula los hilos de máxima velocidad según los núcleos lógicos detectados en el servidor (90% de los núcleos),
+    ''' igual que el procesamiento normal automático, sin verse frenado por ajustes manuales previos.
+    ''' </summary>
+    Public Function ObtenerHilosMaximaVelocidad() As Integer
+        Return CalcularHilosOptimos(10)
     End Function
 
     Private Function CalcularHilosOptimos(margenLibrePct As Integer) As Integer

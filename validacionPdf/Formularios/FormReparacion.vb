@@ -860,15 +860,18 @@ Public Class FormReparacion
 
         progressBar1.Value = 0
 
-        Dim maxHilos = ModuloRecursos.ObtenerHilosOptimos()
+        Dim modoMaximaVelocidad As Boolean = chkMaximaVelocidad.Checked
+        Dim maxHilos = If(modoMaximaVelocidad, ModuloRecursos.ObtenerHilosMaximaVelocidad(), ModuloRecursos.ObtenerHilosOptimos())
         Dim limiteGrandeBytes As Long = ModuloRecursos.LimitePdfGrandeBytes
         Dim colaGrandes As New ConcurrentQueue(Of ItemDiagnostico)(aReparar.Where(Function(i) i.TamanoBytes > limiteGrandeBytes))
         Dim colaPequenos As New ConcurrentQueue(Of ItemDiagnostico)(aReparar.Where(Function(i) i.TamanoBytes <= limiteGrandeBytes))
 
         Dim totalGrandes = colaGrandes.Count
         Dim totalPequenos = colaPequenos.Count
-        Dim maxGrandesEnParalelo = Math.Max(1, Math.Min(20, maxHilos))
-        Dim hilosEncodingPorDocGrande As Integer = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ maxGrandesEnParalelo)))
+        Dim maxGrandesEnParalelo = If(modoMaximaVelocidad, Math.Max(1, maxHilos), Math.Max(1, Math.Min(20, maxHilos)))
+        Dim hilosEncodingPorDocGrande As Integer = If(modoMaximaVelocidad,
+            Math.Max(2, Math.Min(8, maxHilos \ Math.Max(1, Math.Min(total, maxGrandesEnParalelo)))),
+            Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ maxGrandesEnParalelo))))
 
         EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} (Grandes >30MB: {totalGrandes} [tope simultáneo {maxGrandesEnParalelo}] | Ligeros <=30MB: {totalPequenos} [hasta {maxHilos} hilos / 1 por núcleo]). CERO ESPERAS.")
 
@@ -923,7 +926,7 @@ Public Class FormReparacion
                                    If Not exito Then
                                        ' Procesar y convertir a TIFF (250 DPI LZW, escala de grises) con hasta 3 reintentos automáticos ante microcortes de red
                                        Dim maxIntentos As Integer = 3
-                                       Dim hilosDoc As Integer = If(esDocGrande, hilosEncodingPorDocGrande, 1)
+                                       Dim hilosDoc As Integer = If(esDocGrande OrElse modoMaximaVelocidad, hilosEncodingPorDocGrande, 1)
 
                                        For intento As Integer = 1 To maxIntentos
                                            If token.IsCancellationRequested Then
@@ -991,13 +994,14 @@ Public Class FormReparacion
                                            delegacion = System.Text.RegularExpressions.Regex.Replace(mDel.Value, "^ENTREGA\s*", "ENTREGABLE ", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
                                        End If
 
-                                       ModuloConversionTiff.RegistrarExitoEnBd(
+                                       ModuloBitacoraAsync.EncolarTransferenciaTiff(
                                             ModuloConversionTiff.ObtenerRutaRelativa(txtOrigen.Text, item.RutaPdf),
                                             item.CarpetaOrigen,
                                             carpetaDestino,
                                             item.Documento,
                                             item.Documento,
                                             nombreSinExt,
+                                            "", "OK",
                                             totalPags,
                                             delegacion,
                                             usuario,
@@ -1081,6 +1085,8 @@ Public Class FormReparacion
                                Task.WaitAll(tareasConsumidoras.ToArray())
                            End Sub, token)
 
+            ' Confirmar que la cola de bitácora volcó todos los registros OK a MySQL antes de informar el resultado
+            Await Task.Run(Sub() ModuloBitacoraAsync.EsperarVaciado(60000))
             ActualizarVistaGrilla()
             EscribirLogReparador($"[FIN_REPARACION] Total={total} | ReparadosOK={reparadosOk} | Fallados={fallados}")
             MessageBox.Show(
@@ -1156,6 +1162,7 @@ Public Class FormReparacion
         btnAnalizar.Enabled = Not ejecutando
         btnReparar.Enabled = Not ejecutando AndAlso listaCompletaItems.Any(Function(i) i.EsIncompletoOFaltante)
         btnDetener.Enabled = ejecutando
+        chkMaximaVelocidad.Enabled = Not ejecutando
         btnDetener.Text = "⏹ Detener"
         btnExaminarOrigen.Enabled = Not ejecutando
         btnExaminarDestino.Enabled = Not ejecutando

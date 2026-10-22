@@ -34,6 +34,7 @@ Partial Class FormReparacion
         Me.panelBotones = New System.Windows.Forms.Panel()
         Me.btnIndexarOrigen = New System.Windows.Forms.Button()
         Me.chkSoloIncompletos = New System.Windows.Forms.CheckBox()
+        Me.chkMaximaVelocidad = New System.Windows.Forms.CheckBox()
         Me.btnDetener = New System.Windows.Forms.Button()
         Me.btnReparar = New System.Windows.Forms.Button()
         Me.btnAnalizar = New System.Windows.Forms.Button()
@@ -198,6 +199,7 @@ Partial Class FormReparacion
         'panelBotones
         '
         Me.panelBotones.BackColor = System.Drawing.Color.White
+        Me.panelBotones.Controls.Add(Me.chkMaximaVelocidad)
         Me.panelBotones.Controls.Add(Me.chkSoloIncompletos)
         Me.panelBotones.Controls.Add(Me.btnDetener)
         Me.panelBotones.Controls.Add(Me.btnIndexarOrigen)
@@ -215,12 +217,26 @@ Partial Class FormReparacion
         Me.chkSoloIncompletos.Checked = True
         Me.chkSoloIncompletos.CheckState = System.Windows.Forms.CheckState.Checked
         Me.chkSoloIncompletos.Font = New System.Drawing.Font("Segoe UI", 9.5!)
-        Me.chkSoloIncompletos.Location = New System.Drawing.Point(735, 18)
+        Me.chkSoloIncompletos.Location = New System.Drawing.Point(735, 6)
         Me.chkSoloIncompletos.Name = "chkSoloIncompletos"
         Me.chkSoloIncompletos.Size = New System.Drawing.Size(340, 25)
         Me.chkSoloIncompletos.TabIndex = 3
         Me.chkSoloIncompletos.Text = "Mostrar solo incompletos, vacíos o faltantes"
         Me.chkSoloIncompletos.UseVisualStyleBackColor = True
+        '
+        'chkMaximaVelocidad
+        '
+        Me.chkMaximaVelocidad.AutoSize = True
+        Me.chkMaximaVelocidad.Checked = True
+        Me.chkMaximaVelocidad.CheckState = System.Windows.Forms.CheckState.Checked
+        Me.chkMaximaVelocidad.Font = New System.Drawing.Font("Segoe UI", 9.5!, System.Drawing.FontStyle.Bold)
+        Me.chkMaximaVelocidad.ForeColor = System.Drawing.Color.FromArgb(CType(CType(20, Byte), Integer), CType(CType(110, Byte), Integer), CType(CType(40, Byte), Integer))
+        Me.chkMaximaVelocidad.Location = New System.Drawing.Point(735, 32)
+        Me.chkMaximaVelocidad.Name = "chkMaximaVelocidad"
+        Me.chkMaximaVelocidad.Size = New System.Drawing.Size(400, 25)
+        Me.chkMaximaVelocidad.TabIndex = 5
+        Me.chkMaximaVelocidad.Text = "⚡ Máxima velocidad (todos los núcleos detectados)"
+        Me.chkMaximaVelocidad.UseVisualStyleBackColor = True
         '
         'btnDetener
         '
@@ -497,6 +513,7 @@ Partial Class FormReparacion
     Friend WithEvents btnReparar As Button
     Friend WithEvents btnDetener As Button
     Friend WithEvents chkSoloIncompletos As CheckBox
+    Friend WithEvents chkMaximaVelocidad As CheckBox
     Friend WithEvents dgvArchivos As DataGridView
     Friend WithEvents panelInferior As Panel
     Friend WithEvents progressBar1 As ProgressBar
