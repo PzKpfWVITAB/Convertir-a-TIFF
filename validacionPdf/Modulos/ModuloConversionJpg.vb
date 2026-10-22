@@ -19,6 +19,38 @@ Public Module ModuloConversionJpg
     Public Const CALIDAD_JPG As Integer = 85
 
     ''' <summary>
+    ''' Convierte cualquier ruta UNC (\\servidor\recurso\...) o local (C:\...) al formato extendido Win32
+    ''' (\\?\UNC\servidor\recurso\... o \\?\C:\...) para superar el límite de 260 caracteres (MAX_PATH)
+    ''' hasta 32,767 caracteres sin errores DirectoryNotFoundException ni PathTooLongException.
+    ''' </summary>
+    Public Function APrefijoRutaLarga(ruta As String) As String
+        If String.IsNullOrWhiteSpace(ruta) Then Return ruta
+        Dim r = ruta.Trim().Replace("/"c, "\"c)
+        If r.StartsWith("\\?\", StringComparison.Ordinal) Then Return r
+        If r.StartsWith("\\", StringComparison.Ordinal) Then
+            Return "\\?\UNC\" & r.Substring(2)
+        End If
+        If r.Length >= 2 AndAlso r(1) = ":"c Then
+            Return "\\?\" & r
+        End If
+        Return r
+    End Function
+
+    ''' <summary>
+    ''' Devuelve la ruta limpia sin el prefijo extendido Win32 (\\?\UNC\ o \\?\) para visualización o base de datos.
+    ''' </summary>
+    Public Function QuitarPrefijoRutaLarga(ruta As String) As String
+        If String.IsNullOrWhiteSpace(ruta) Then Return ruta
+        If ruta.StartsWith("\\?\UNC\", StringComparison.OrdinalIgnoreCase) Then
+            Return "\\" & ruta.Substring(8)
+        End If
+        If ruta.StartsWith("\\?\", StringComparison.OrdinalIgnoreCase) Then
+            Return ruta.Substring(4)
+        End If
+        Return ruta
+    End Function
+
+    ''' <summary>
     ''' Obtiene rápidamente el número total de páginas de un PDF sin descomprimirlo en RAM.
     ''' Implementa múltiples motores de alta resiliencia:
     ''' 1. Inspección binaria directa de cabecera/trailer (/Count N) en 1 ms.
@@ -27,11 +59,12 @@ Public Module ModuloConversionJpg
     ''' 4. ImageMagick Ping.
     ''' </summary>
     Public Function ObtenerTotalPaginasPdf(rutaPdf As String) As Integer
-        If String.IsNullOrWhiteSpace(rutaPdf) OrElse Not File.Exists(rutaPdf) Then Return 0
+        Dim rutaLarga = APrefijoRutaLarga(rutaPdf)
+        If String.IsNullOrWhiteSpace(rutaPdf) OrElse Not File.Exists(rutaLarga) Then Return 0
 
         ' 1. INTENTO ULTRARRÁPIDO EN 1 MS: Inspección binaria directa de cabecera/trailer (/Count N)
         Try
-            Dim pagsBin = ObtenerPaginasPdfPorRegex(rutaPdf)
+            Dim pagsBin = ObtenerPaginasPdfPorRegex(rutaLarga)
             If pagsBin > 0 Then Return pagsBin
         Catch exBin As Exception
         End Try
@@ -46,11 +79,13 @@ Public Module ModuloConversionJpg
         ' 3. Intento con iText 7 (permisivo ante restricciones de scanner/permisos) (~200-500 ms)
         Try
             Dim readerProps As New ReaderProperties()
-            Using reader As New PdfReader(rutaPdf, readerProps)
-                reader.SetUnethicalReading(True)
-                Using doc As New PdfDocument(reader)
-                    Dim pags = doc.GetNumberOfPages()
-                    If pags > 0 Then Return pags
+            Using fs As New FileStream(rutaLarga, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                Using reader As New PdfReader(fs, readerProps)
+                    reader.SetUnethicalReading(True)
+                    Using doc As New PdfDocument(reader)
+                        Dim pags = doc.GetNumberOfPages()
+                        If pags > 0 Then Return pags
+                    End Using
                 End Using
             End Using
         Catch exIText As Exception
@@ -58,9 +93,11 @@ Public Module ModuloConversionJpg
 
         ' 4. Intento con ImageMagick (Ping de metadatos)
         Try
-            Using col As New MagickImageCollection()
-                col.Ping(rutaPdf)
-                If col.Count > 0 Then Return col.Count
+            Using fs As New FileStream(rutaLarga, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                Using col As New MagickImageCollection()
+                    col.Ping(fs)
+                    If col.Count > 0 Then Return col.Count
+                End Using
             End Using
         Catch
         End Try
@@ -73,13 +110,21 @@ Public Module ModuloConversionJpg
     ''' Es extraordinariamente rápido (~2-5ms) y capaz de reparar tablas XREF corruptas en memoria.
     ''' </summary>
     Private Function ObtenerPaginasPdfConMuPdf(rutaPdf As String) As Integer
+        Dim archivoTempCorto As String = Nothing
         Try
             Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
             If String.IsNullOrEmpty(muExe) OrElse Not File.Exists(muExe) Then Return 0
 
+            Dim rutaEfectiva = rutaPdf
+            If rutaPdf.Length >= 240 Then
+                archivoTempCorto = Path.Combine(ModuloRecursos.ObtenerRutaStaging(), $"cnt_{Process.GetCurrentProcess().Id}_{Guid.NewGuid():N}.pdf")
+                File.Copy(APrefijoRutaLarga(rutaPdf), archivoTempCorto, True)
+                rutaEfectiva = archivoTempCorto
+            End If
+
             Dim psi As New ProcessStartInfo With {
                 .FileName = muExe,
-                .Arguments = $"show -r ""{rutaPdf}"" pages",
+                .Arguments = $"show -r ""{rutaEfectiva}"" pages",
                 .UseShellExecute = False,
                 .CreateNoWindow = True,
                 .RedirectStandardOutput = True,
@@ -114,6 +159,13 @@ Public Module ModuloConversionJpg
                 End If
             End Using
         Catch
+        Finally
+            If Not String.IsNullOrEmpty(archivoTempCorto) Then
+                Try
+                    File.Delete(archivoTempCorto)
+                Catch
+                End Try
+            End If
         End Try
         Return 0
     End Function
@@ -124,13 +176,14 @@ Public Module ModuloConversionJpg
     ''' </summary>
     Private Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
         Try
-            Dim fi As New FileInfo(rutaPdf)
+            Dim rutaLarga = APrefijoRutaLarga(rutaPdf)
+            Dim fi As New FileInfo(rutaLarga)
             If fi.Length = 0 Then Return 0
 
             Dim tamLectura = Math.Min(CInt(fi.Length), 131072)
             Dim buffer(tamLectura - 1) As Byte
 
-            Using fs As New FileStream(rutaPdf, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+            Using fs As New FileStream(rutaLarga, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
                 Dim leidos = fs.Read(buffer, 0, tamLectura)
                 If leidos > 0 Then
                     Dim textoInicio = Encoding.ASCII.GetString(buffer, 0, leidos)
@@ -195,7 +248,8 @@ Public Module ModuloConversionJpg
         ByRef mensajeError As String
     ) As Boolean
         Try
-            If Not Directory.Exists(carpetaDestino) Then
+            Dim carpetaLarga = APrefijoRutaLarga(carpetaDestino)
+            If Not Directory.Exists(carpetaLarga) Then
                 mensajeError = "La carpeta de destino no existe físicamente."
                 Return False
             End If
@@ -205,7 +259,7 @@ Public Module ModuloConversionJpg
                 Return False
             End If
 
-            Dim archivosJpg = Directory.GetFiles(carpetaDestino, "*.jpg")
+            Dim archivosJpg = Directory.GetFiles(carpetaLarga, "*.jpg")
 
             If archivosJpg.Length <> totalPaginasEsperadas Then
                 mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosJpg.Length} imágenes JPG."
@@ -213,7 +267,7 @@ Public Module ModuloConversionJpg
             End If
 
             For i As Integer = 1 To totalPaginasEsperadas
-                Dim archivoEsperado = Path.Combine(carpetaDestino, $"{nombreBase}_{i}.jpg")
+                Dim archivoEsperado = APrefijoRutaLarga(Path.Combine(carpetaDestino, $"{nombreBase}_{i}.jpg"))
 
                 If Not File.Exists(archivoEsperado) Then
                     mensajeError = $"Falta la página física requerida: {nombreBase}_{i}.jpg"
@@ -222,7 +276,7 @@ Public Module ModuloConversionJpg
 
                 Dim fi As New FileInfo(archivoEsperado)
                 If fi.Length < 100 Then
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está incompleto o en 0 bytes (tamaño: {fi.Length} bytes)."
+                    mensajeError = $"El archivo {nombreBase}_{i}.jpg está incompleto o en 0 bytes (tamaño: {fi.Length} bytes)."
                     Return False
                 End If
 
@@ -230,19 +284,21 @@ Public Module ModuloConversionJpg
                     Dim header(2) As Byte
                     Dim leidos = fs.Read(header, 0, 3)
                     If leidos < 3 OrElse header(0) <> &HFF OrElse header(1) <> &HD8 OrElse header(2) <> &HFF Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} no contiene una cabecera JPEG válida."
+                        mensajeError = $"El archivo {nombreBase}_{i}.jpg no contiene una cabecera JPEG válida."
                         Return False
                     End If
                 End Using
 
                 Try
-                    Dim info As New MagickImageInfo(archivoEsperado)
-                    If info.Width <= 0 OrElse info.Height <= 0 Then
-                        mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} tiene dimensiones inválidas."
-                        Return False
-                    End If
+                    Using fsInfo As New FileStream(archivoEsperado, FileMode.Open, FileAccess.Read, FileShare.Read)
+                        Dim info As New MagickImageInfo(fsInfo)
+                        If info.Width <= 0 OrElse info.Height <= 0 Then
+                            mensajeError = $"El archivo {nombreBase}_{i}.jpg tiene dimensiones inválidas."
+                            Return False
+                        End If
+                    End Using
                 Catch exImg As Exception
-                    mensajeError = $"El archivo {Path.GetFileName(archivoEsperado)} está dañado: {exImg.Message}"
+                    mensajeError = $"El archivo {nombreBase}_{i}.jpg está dañado: {exImg.Message}"
                     Return False
                 End Try
             Next
@@ -271,7 +327,8 @@ Public Module ModuloConversionJpg
         ByRef mensajeError As String
     ) As Boolean
         Try
-            Dim di As New DirectoryInfo(carpetaDestino)
+            Dim carpetaLarga = APrefijoRutaLarga(carpetaDestino)
+            Dim di As New DirectoryInfo(carpetaLarga)
             If Not di.Exists Then
                 mensajeError = "La carpeta de destino no existe físicamente."
                 Return False
@@ -308,7 +365,7 @@ Public Module ModuloConversionJpg
             Next
 
             ' Verificar cabecera binaria de página inicial (página 1)
-            Dim pagInicial = Path.Combine(carpetaDestino, $"{nombreBase}_1.jpg")
+            Dim pagInicial = APrefijoRutaLarga(Path.Combine(carpetaDestino, $"{nombreBase}_1.jpg"))
             Using fs As New FileStream(pagInicial, FileMode.Open, FileAccess.Read, FileShare.Read)
                 Dim h(2) As Byte
                 If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
@@ -319,7 +376,7 @@ Public Module ModuloConversionJpg
 
             ' Si tiene más de una página, verificar cabecera binaria de la página final
             If totalPaginasEsperadas > 1 Then
-                Dim pagFinal = Path.Combine(carpetaDestino, $"{nombreBase}_{totalPaginasEsperadas}.jpg")
+                Dim pagFinal = APrefijoRutaLarga(Path.Combine(carpetaDestino, $"{nombreBase}_{totalPaginasEsperadas}.jpg"))
                 Using fs As New FileStream(pagFinal, FileMode.Open, FileAccess.Read, FileShare.Read)
                     Dim h(2) As Byte
                     If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
@@ -356,6 +413,7 @@ Public Module ModuloConversionJpg
             Dim destinoDirectorioFinal = Path.Combine(destinoBase, directorioRelativo)
             Dim nombreSinExt = Path.GetFileNameWithoutExtension(archivoPdf)
             Dim carpetaPdfDestino = Path.Combine(destinoDirectorioFinal, nombreSinExt)
+            Dim carpetaPdfDestinoLarga = APrefijoRutaLarga(carpetaPdfDestino)
 
             ' 1. Verificación instantánea con caché en RAM del directorio padre (evita miles de llamadas SMB)
             If cacheDirectoriosDestino IsNot Nothing Then
@@ -363,8 +421,9 @@ Public Module ModuloConversionJpg
                     Return New Lazy(Of HashSet(Of String))(Function()
                         Dim hs As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
                         Try
-                            If Directory.Exists(dirPadre) Then
-                                For Each subDir In Directory.GetDirectories(dirPadre)
+                            Dim dirPadreLargo = APrefijoRutaLarga(dirPadre)
+                            If Directory.Exists(dirPadreLargo) Then
+                                For Each subDir In Directory.GetDirectories(dirPadreLargo)
                                     hs.Add(Path.GetFileName(subDir))
                                 Next
                             End If
@@ -378,7 +437,7 @@ Public Module ModuloConversionJpg
                     Return False
                 End If
             Else
-                If Not Directory.Exists(carpetaPdfDestino) Then Return False
+                If Not Directory.Exists(carpetaPdfDestinoLarga) Then Return False
             End If
 
             ' 2. Determinar páginas esperadas desde el índice en memoria o BD (con estatus OK)
@@ -411,7 +470,7 @@ Public Module ModuloConversionJpg
 
             ' 3. Si conocemos las páginas esperadas por BD/Índice y el estatus en BD ya es OK:
             If paginasEsperadas > 0 AndAlso infoBd IsNot Nothing AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) Then
-                Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
+                Dim archivosJpg = Directory.GetFiles(carpetaPdfDestinoLarga, "*.jpg")
                 If archivosJpg.Length = paginasEsperadas Then
                     totalPaginas = paginasEsperadas
                     Return True
@@ -466,7 +525,8 @@ Public Module ModuloConversionJpg
             Throw New FileNotFoundException("No se encontró el ejecutable de MuPDF (mutool.exe).")
         End If
 
-        If Not File.Exists(pdfPath) Then
+        Dim pdfPathLargo = APrefijoRutaLarga(pdfPath)
+        If Not File.Exists(pdfPathLargo) Then
             Throw New FileNotFoundException("No se encontró el archivo PDF: " & pdfPath)
         End If
 
@@ -481,6 +541,14 @@ Public Module ModuloConversionJpg
         Try
             If token.IsCancellationRequested Then Throw New OperationCanceledException()
 
+            ' Si la ruta del PDF de origen es muy larga (>= 240 caracteres), copiar primero a staging local con ruta corta
+            ' para evitar que el binario nativo mutool.exe falle por MAX_PATH (260 caracteres) en fopen()
+            Dim pdfInputParaMuPdf As String = pdfPath
+            If pdfPath.Length >= 240 Then
+                pdfInputParaMuPdf = Path.Combine(stagingCarpeta, "doc_origen.pdf")
+                File.Copy(pdfPathLargo, pdfInputParaMuPdf, True)
+            End If
+
             Dim patronSalidaPng = Path.Combine(stagingCarpeta, "p_%d.png")
 
             ' MuPDF: renderizado a 200 DPI directamente
@@ -491,7 +559,7 @@ Public Module ModuloConversionJpg
             args.Append($"-r {RESOLUCION_DPI} ")
             args.Append("-c rgb ")
             args.Append($"-o ""{patronSalidaPng}"" ")
-            args.Append($"""{pdfPath}""")
+            args.Append($"""{pdfInputParaMuPdf}""")
 
             Dim psi As New ProcessStartInfo With {
                 .FileName = muExe,
@@ -618,37 +686,38 @@ Public Module ModuloConversionJpg
                 Throw New IOException($"Discrepancia en staging local: el PDF tiene {paginasEsperadas} páginas pero solo se generaron {jpgsLocales.Length} imágenes JPG.")
             End If
 
-            ' Asegurar la carpeta de destino en almacenamiento de forma segura
-            If Not Directory.Exists(carpetaDestino) Then
-                Directory.CreateDirectory(carpetaDestino)
+            ' Asegurar la carpeta de destino en almacenamiento de forma segura usando ruta extendida Win32 (\\?\UNC\...)
+            Dim carpetaDestinoLarga = APrefijoRutaLarga(carpetaDestino)
+            If Not Directory.Exists(carpetaDestinoLarga) Then
+                Directory.CreateDirectory(carpetaDestinoLarga)
                 Thread.Sleep(50)
             End If
 
-            ' Transferir de forma segura con .NET administrado (inmune a fallos de codificación nativa en SMB)
+            ' Transferir de forma segura con .NET administrado y soporte de rutas largas (> 260 caracteres)
             Dim numHilosCopia = Math.Max(2, Math.Min(6, Environment.ProcessorCount \ 2))
             Dim poptCopia As New ParallelOptions With {.MaxDegreeOfParallelism = numHilosCopia, .CancellationToken = token}
             Parallel.ForEach(jpgsLocales, poptCopia, Sub(jpgLoc)
                 If token.IsCancellationRequested Then Throw New OperationCanceledException()
                 Dim nomArchivo = Path.GetFileName(jpgLoc)
-                Dim rutaDestinoFinal = Path.Combine(carpetaDestino, nomArchivo)
+                Dim rutaDestinoFinalLarga = APrefijoRutaLarga(Path.Combine(carpetaDestino, nomArchivo))
 
                 Dim copiado As Boolean = False
                 Dim ultimoEx As Exception = Nothing
                 For intento As Integer = 1 To 4
                     Try
-                        If Not Directory.Exists(carpetaDestino) Then
+                        If Not Directory.Exists(carpetaDestinoLarga) Then
                             SyncLock lockerPaginas
-                                If Not Directory.Exists(carpetaDestino) Then Directory.CreateDirectory(carpetaDestino)
+                                If Not Directory.Exists(carpetaDestinoLarga) Then Directory.CreateDirectory(carpetaDestinoLarga)
                             End SyncLock
                         End If
-                        File.Copy(jpgLoc, rutaDestinoFinal, True)
+                        File.Copy(jpgLoc, rutaDestinoFinalLarga, True)
                         copiado = True
                         Exit For
                     Catch exCopy As Exception
                         ultimoEx = exCopy
                         Thread.Sleep(150 * intento)
                         Try
-                            Directory.CreateDirectory(carpetaDestino)
+                            Directory.CreateDirectory(carpetaDestinoLarga)
                         Catch
                         End Try
                     End Try
@@ -687,8 +756,10 @@ Public Module ModuloConversionJpg
     ''' </summary>
     Public Sub VaciarArchivosDeCarpeta(carpetaDestino As String)
         Try
-            If String.IsNullOrWhiteSpace(carpetaDestino) OrElse Not Directory.Exists(carpetaDestino) Then Exit Sub
-            Dim archivos = Directory.GetFiles(carpetaDestino, "*.jpg")
+            If String.IsNullOrWhiteSpace(carpetaDestino) Then Exit Sub
+            Dim carpetaLarga = APrefijoRutaLarga(carpetaDestino)
+            If Not Directory.Exists(carpetaLarga) Then Exit Sub
+            Dim archivos = Directory.GetFiles(carpetaLarga, "*.jpg")
             For Each f In archivos
                 Try
                     File.Delete(f)
@@ -705,10 +776,11 @@ Public Module ModuloConversionJpg
     ''' </summary>
     Public Function EsArchivoListoParaLectura(rutaArchivo As String) As Boolean
         Try
-            If Not File.Exists(rutaArchivo) Then Return False
-            Dim fi As New FileInfo(rutaArchivo)
+            Dim rutaLarga = APrefijoRutaLarga(rutaArchivo)
+            If Not File.Exists(rutaLarga) Then Return False
+            Dim fi As New FileInfo(rutaLarga)
             If fi.Length < 32 Then Return False
-            Using fs As New FileStream(rutaArchivo, FileMode.Open, FileAccess.Read, FileShare.None)
+            Using fs As New FileStream(rutaLarga, FileMode.Open, FileAccess.Read, FileShare.None)
                 Return fs.Length >= 32
             End Using
         Catch
@@ -721,8 +793,10 @@ Public Module ModuloConversionJpg
     ''' </summary>
     Public Sub LimpiarCarpetaIncompleta(carpetaDestino As String)
         Try
-            If String.IsNullOrWhiteSpace(carpetaDestino) OrElse Not Directory.Exists(carpetaDestino) Then Exit Sub
-            Dim archivos = Directory.GetFiles(carpetaDestino, "*.*")
+            If String.IsNullOrWhiteSpace(carpetaDestino) Then Exit Sub
+            Dim carpetaLarga = APrefijoRutaLarga(carpetaDestino)
+            If Not Directory.Exists(carpetaLarga) Then Exit Sub
+            Dim archivos = Directory.GetFiles(carpetaLarga, "*.*")
             For Each f In archivos
                 Try
                     File.SetAttributes(f, FileAttributes.Normal)
@@ -730,7 +804,7 @@ Public Module ModuloConversionJpg
                 Catch
                 End Try
             Next
-            Directory.Delete(carpetaDestino, True)
+            Directory.Delete(carpetaLarga, True)
         Catch ex As Exception
             Debug.WriteLine("Error al limpiar carpeta incompleta: " & ex.Message)
         End Try
