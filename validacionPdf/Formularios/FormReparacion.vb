@@ -372,11 +372,10 @@ Public Class FormReparacion
                                ' 4. Verificación Bidireccional: Detectar Registros Huérfanos o Duplicados en BD
                                Me.BeginInvoke(Sub() lblStatus.Text = "Verificando consistencia con la base de datos (duplicados y huérfanos)...")
                                Try
-                                   Dim nombreCarpetaOrigen = Path.GetFileName(origen.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-                                   Dim registrosBd = ModuloConversionTiff.ObtenerRegistrosBitacoraPorCarpeta(nombreCarpetaOrigen)
+                                   Dim registrosBd = ModuloConversionTiff.ObtenerRegistrosBitacoraPorCarpeta(origen)
 
                                    If registrosBd IsNot Nothing AndAlso registrosBd.Count > 0 Then
-                                       ' A. Detección de Duplicados en BD
+                                       ' A. Detección de Duplicados en BD (agrupando por subcarpeta + documento para respetar homónimos legítimos en distintas subcarpetas)
                                        Dim idsBdAgregados As New HashSet(Of Long)()
 
                                        Dim normalizarNombre = Function(texto As String) As String
@@ -389,10 +388,18 @@ Public Class FormReparacion
                                            End Try
                                        End Function
 
+                                       Dim normalizarCarpeta = Function(rutaCarpeta As String) As String
+                                           If String.IsNullOrWhiteSpace(rutaCarpeta) Then Return ""
+                                           Return rutaCarpeta.Trim().Replace("/"c, "\"c).TrimEnd("\"c).ToLowerInvariant()
+                                       End Function
+
                                        Dim grupos = registrosBd.GroupBy(Function(r)
                                            Dim c = normalizarNombre(r.Documento)
                                            If String.IsNullOrEmpty(c) Then c = normalizarNombre(r.NombreOriginal)
-                                           Return c
+                                           If String.IsNullOrEmpty(c) Then Return ""
+                                           Dim dirKey = normalizarCarpeta(r.CarpetaOrigen)
+                                           If String.IsNullOrEmpty(dirKey) Then dirKey = normalizarCarpeta(Path.GetDirectoryName(If(r.CarpetaDestino, "")))
+                                           Return dirKey & "|" & c
                                        End Function, StringComparer.OrdinalIgnoreCase).Where(Function(g) Not String.IsNullOrEmpty(g.Key))
 
                                        For Each g In grupos
@@ -423,9 +430,16 @@ Public Class FormReparacion
 
                                        ' B. Detección de Huérfanos en BD (Existen en BD pero NO existen físicamente en disco)
                                        Dim setNombresFisicos As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                                       Dim setRutasCompuestasFisicas As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
                                        For Each p In archivosPdf
                                            Dim n = normalizarNombre(p)
-                                           If Not String.IsNullOrEmpty(n) Then setNombresFisicos.Add(n)
+                                           If Not String.IsNullOrEmpty(n) Then
+                                               setNombresFisicos.Add(n)
+                                               Dim dirP = normalizarCarpeta(Path.GetDirectoryName(p))
+                                               If Not String.IsNullOrEmpty(dirP) Then
+                                                   setRutasCompuestasFisicas.Add(dirP & "|" & n)
+                                               End If
+                                           End If
                                            setNombresFisicos.Add(Path.GetFileName(p))
                                        Next
 
@@ -458,10 +472,18 @@ Public Class FormReparacion
                                                Continue For
                                            End If
 
-                                           Dim existeFisico = (Not String.IsNullOrEmpty(claveDoc) AndAlso setNombresFisicos.Contains(claveDoc)) OrElse
+                                           Dim dirReg = normalizarCarpeta(reg.CarpetaOrigen)
+                                           Dim existeFisico As Boolean = False
+                                           If Not String.IsNullOrEmpty(dirReg) AndAlso (dirReg.Contains("\"c) OrElse dirReg.Contains(":"c)) Then
+                                               existeFisico = (Not String.IsNullOrEmpty(claveDoc) AndAlso setRutasCompuestasFisicas.Contains(dirReg & "|" & claveDoc)) OrElse
+                                                              (Not String.IsNullOrEmpty(claveOrig) AndAlso setRutasCompuestasFisicas.Contains(dirReg & "|" & claveOrig))
+                                           End If
+                                           If Not existeFisico Then
+                                               existeFisico = (Not String.IsNullOrEmpty(claveDoc) AndAlso setNombresFisicos.Contains(claveDoc)) OrElse
                                                               (Not String.IsNullOrEmpty(claveOrig) AndAlso setNombresFisicos.Contains(claveOrig)) OrElse
                                                               (Not String.IsNullOrEmpty(reg.Documento) AndAlso setNombresFisicos.Contains(Path.GetFileName(reg.Documento))) OrElse
                                                               (Not String.IsNullOrEmpty(reg.NombreOriginal) AndAlso setNombresFisicos.Contains(Path.GetFileName(reg.NombreOriginal)))
+                                           End If
 
                                            If Not existeFisico Then
                                                Dim idReg = reg.Id
@@ -521,7 +543,7 @@ Public Class FormReparacion
     End Sub
 
     ''' <summary>
-    ''' Auditoría ultrarrápida: consulta la BD y el índice de origen en RAM (0 ms) y solo examina a fondo los que tienen discrepancias físicas.
+    ''' Auditoría ultrarrápida: consulta la BD y el índice de origen en RAM (0 ms) y verifica físicamente en destino.
     ''' </summary>
     Private Function AnalizarUnPdfOptimizado(
         origenBase As String,
@@ -565,11 +587,16 @@ Public Class FormReparacion
         End If
 
         Try
-            ' 1. Consulta ultrarrápida en memoria (O(1))
+            ' 1. Consulta ultrarrápida en memoria (O(1)) priorizando ruta exacta de carpeta destino/origen
             Dim infoBd As ModuloConversionTiff.InfoRegistroBd = Nothing
             If mapaBd IsNot Nothing Then
-                If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
-                    mapaBd.TryGetValue(item.Documento, infoBd)
+                Dim claveDest = carpetaDestinoEsperada.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                If Not mapaBd.TryGetValue(claveDest, infoBd) Then
+                    If Not mapaBd.TryGetValue(rutaPdf, infoBd) Then
+                        If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
+                            mapaBd.TryGetValue(item.Documento, infoBd)
+                        End If
+                    End If
                 End If
             End If
 
@@ -618,14 +645,17 @@ Public Class FormReparacion
                 Return item
             End If
 
-            ' 3. Vía rápida para los ya completados y registrados en BD (Evita leer 100,000 PDFs por red SMB)
+            ' 3. Vía rápida para los ya completados y registrados en BD (validando tamaños > 0 y cabeceras en 1 llamada SMB)
             If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" AndAlso infoBd.Paginas > 0 AndAlso infoBd.Paginas = archivosTiff.Length Then
-                item.PagsEsperadas = infoBd.Paginas
-                item.Estado = "✔️ Correcto (OK)"
-                item.Detalle = "Físico completo y verificado contra registro en BD."
-                item.EsIncompletoOFaltante = False
-                item.Seleccionado = False
-                Return item
+                Dim errIntBd As String = ""
+                If ModuloConversionTiff.ValidarIntegridadDiagnosticoRapidoTiff(carpetaDestinoEsperada, nombreSinExt, infoBd.Paginas, errIntBd) Then
+                    item.PagsEsperadas = infoBd.Paginas
+                    item.Estado = "✔️ Correcto (OK)"
+                    item.Detalle = "Físico completo (todas las páginas verificadas sin archivos de 0 bytes) y registrado en BD."
+                    item.EsIncompletoOFaltante = False
+                    item.Seleccionado = False
+                    Return item
+                End If
             End If
 
             ' 3b. Vía rápida usando el índice permanente en memoria si coincide exactamente con los TIFFs físicos
@@ -808,7 +838,7 @@ Public Class FormReparacion
             $"Prioridad: Ordenados por peso (de mayor a menor peso: {pesoMaxMB:0.1} MB máx -> {pesoMinMB:0.1} MB mín).{vbCrLf}{vbCrLf}" &
             "Acciones que realizará el sistema:" & vbCrLf &
             "1. Eliminará las carpetas y archivos destino incompletos para evitar mezclas o corrupción." & vbCrLf &
-            "2. Convertirá directamente los PDFs originales a imágenes TIFF a 250 DPI LZW (Escala de Grises)." & vbCrLf &
+            "2. Convertirá directamente los PDFs originales a imágenes TIFF a 250 DPI LZW (Escala de Grises, con reintentos automáticos)." & vbCrLf &
             "3. Validará la integridad física de cada página generada." & vbCrLf &
             "4. Actualizará la Base de Datos con estatus OK para que los números cuadren al 100%." & vbCrLf & vbCrLf &
             "¿Desea iniciar la reparación ahora?",
@@ -837,12 +867,13 @@ Public Class FormReparacion
         Dim totalGrandes = colaGrandes.Count
         Dim totalPequenos = colaPequenos.Count
         Dim maxGrandesEnParalelo = Math.Max(1, Math.Min(20, maxHilos))
+        Dim hilosEncodingPorDocGrande As Integer = Math.Max(2, Math.Min(4, Math.Max(2, Environment.ProcessorCount \ maxGrandesEnParalelo)))
 
         EscribirLogReparador($"[INICIO_REPARACION] Total a reparar={total} (Grandes >30MB: {totalGrandes} [tope simultáneo {maxGrandesEnParalelo}] | Ligeros <=30MB: {totalPequenos} [hasta {maxHilos} hilos / 1 por núcleo]). CERO ESPERAS.")
 
         Try
             Await Task.Run(Sub()
-                               Dim procesarItem = Sub(item As ItemDiagnostico)
+                               Dim procesarItem = Sub(item As ItemDiagnostico, esDocGrande As Boolean)
                                    If token.IsCancellationRequested Then Exit Sub
 
                                    ' Manejo de registros huérfanos o duplicados en BD (depurar de BD para cuadrar cifras)
@@ -874,51 +905,79 @@ Public Class FormReparacion
 
                                    Dim nombreSinExt = Path.GetFileNameWithoutExtension(item.Documento)
                                    Dim carpetaDestino = item.CarpetaDestino
-
-                                   ' 1. Vaciar archivos incompletos previos si la carpeta ya existía
-                                   ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
-
-                                   ' 2. Procesar y convertir a TIFF (250 DPI LZW, escala de grises)
                                    Dim totalPags As Integer = 0
                                    Dim exito As Boolean = False
                                    Dim msgError As String = ""
 
-                                   Try
-                                       ModuloConversionTiff.ConvertirPdfTiffMuPdf(
-                                            item.RutaPdf,
-                                            carpetaDestino,
-                                            nombreSinExt,
-                                            totalPags,
-                                            token,
-                                            False,
-                                            1,
-                                            Nothing,
-                                            ProcesosConversion
-                                        )
-
-                                       ' 3. Validación física de integridad
-                                       If ModuloConversionTiff.ValidarIntegridadDiagnosticoRapidoTiff(carpetaDestino, nombreSinExt, totalPags, msgError) Then
+                                   ' Vía rápida: si las imágenes físicas ya estaban completas y verificadas ("Físico OK (Falta en BD)"),
+                                   ' verificar una vez más sin borrar y solo sincronizar en BD
+                                   If item.Estado.Contains("Falta en BD") AndAlso item.PagsEsperadas > 0 Then
+                                       Dim errCheckRapido As String = ""
+                                       If ModuloConversionTiff.ValidarIntegridadDiagnosticoRapidoTiff(carpetaDestino, nombreSinExt, item.PagsEsperadas, errCheckRapido) Then
+                                           totalPags = item.PagsEsperadas
                                            exito = True
-                                       Else
-                                           exito = False
-                                           ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
                                        End If
+                                   End If
 
-                                   Catch exOp As OperationCanceledException
-                                       ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
-                                       Exit Sub
-                                   Catch exGen As Exception
-                                       exito = False
-                                       Dim errDetalle As String = exGen.Message
-                                       If TypeOf exGen Is AggregateException Then
-                                           Dim agg = DirectCast(exGen, AggregateException).Flatten()
-                                           errDetalle = String.Join(" | ", agg.InnerExceptions.Select(Function(ie) ie.Message))
-                                       ElseIf exGen.InnerException IsNot Nothing Then
-                                           errDetalle &= " | " & exGen.InnerException.Message
-                                       End If
-                                       msgError = errDetalle
-                                       ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
-                                   End Try
+                                   If Not exito Then
+                                       ' Procesar y convertir a TIFF (250 DPI LZW, escala de grises) con hasta 3 reintentos automáticos ante microcortes de red
+                                       Dim maxIntentos As Integer = 3
+                                       Dim hilosDoc As Integer = If(esDocGrande, hilosEncodingPorDocGrande, 1)
+
+                                       For intento As Integer = 1 To maxIntentos
+                                           If token.IsCancellationRequested Then
+                                               ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
+                                               Exit Sub
+                                           End If
+
+                                           Try
+                                               ' 1. Vaciar archivos incompletos previos si la carpeta ya existía
+                                               ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
+
+                                               totalPags = 0
+                                               ModuloConversionTiff.ConvertirPdfTiffMuPdf(
+                                                    item.RutaPdf,
+                                                    carpetaDestino,
+                                                    nombreSinExt,
+                                                    totalPags,
+                                                    token,
+                                                    esDocGrande,
+                                                    hilosDoc,
+                                                    Nothing,
+                                                    ProcesosConversion
+                                                )
+
+                                               ' 3. Validación física de integridad
+                                               If ModuloConversionTiff.ValidarIntegridadDiagnosticoRapidoTiff(carpetaDestino, nombreSinExt, totalPags, msgError) Then
+                                                   exito = True
+                                                   Exit For
+                                               Else
+                                                   exito = False
+                                                   ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
+                                               End If
+
+                                           Catch exOp As OperationCanceledException
+                                               ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
+                                               Exit Sub
+                                           Catch exGen As Exception
+                                               exito = False
+                                               Dim errDetalle As String = exGen.Message
+                                               If TypeOf exGen Is AggregateException Then
+                                                   Dim agg = DirectCast(exGen, AggregateException).Flatten()
+                                                   errDetalle = String.Join(" | ", agg.InnerExceptions.Select(Function(ie) ie.Message))
+                                               ElseIf exGen.InnerException IsNot Nothing Then
+                                                   errDetalle &= " | " & exGen.InnerException.Message
+                                               End If
+                                               msgError = errDetalle
+                                               ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaDestino)
+                                           End Try
+
+                                           If Not exito AndAlso intento < maxIntentos AndAlso Not token.IsCancellationRequested Then
+                                               EscribirLogReparador($"[REINTENTO_REPARACION {intento}/{maxIntentos}] PDF='{item.RutaPdf}' -> Motivo previo: {msgError}")
+                                               Thread.Sleep(500 * intento)
+                                           End If
+                                       Next
+                                   End If
 
                                    ' 4. Registro en BD si fue exitoso
                                    If exito Then
@@ -926,6 +985,10 @@ Public Class FormReparacion
                                        Dim anioMatch = System.Text.RegularExpressions.Regex.Match(nombreSinExt, "\b(19\d{2}|20\d{2})\b")
                                        Dim anioStr = If(anioMatch.Success, anioMatch.Value, "")
                                        Dim delegacion = Path.GetFileName(Path.GetDirectoryName(carpetaDestino))
+                                       Dim mDel = System.Text.RegularExpressions.Regex.Match(carpetaDestino, "(ENTREGABLE\s*\d+|ENTREGA\s*\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                                       If mDel.Success Then
+                                           delegacion = System.Text.RegularExpressions.Regex.Replace(mDel.Value, "^ENTREGA\s*", "ENTREGABLE ", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                                       End If
 
                                        ModuloConversionTiff.RegistrarExitoEnBd(
                                             ModuloConversionTiff.ObtenerRutaRelativa(txtOrigen.Text, item.RutaPdf),
@@ -933,7 +996,7 @@ Public Class FormReparacion
                                             carpetaDestino,
                                             item.Documento,
                                             item.Documento,
-                                            item.Documento,
+                                            nombreSinExt,
                                             totalPags,
                                             delegacion,
                                             usuario,
@@ -1001,7 +1064,7 @@ Public Class FormReparacion
                                            If itemAProcesar Is Nothing Then Exit While
 
                                            Try
-                                               procesarItem(itemAProcesar)
+                                               procesarItem(itemAProcesar, esGrande)
                                            Finally
                                                If esGrande Then
                                                    SyncLock lockerCola
@@ -1042,6 +1105,7 @@ Public Class FormReparacion
             EscribirLogReparador($"[EXCEPCION_GENERAL_REPARACION] {mensajeError}")
             MessageBox.Show("Error durante la reparación:" & Environment.NewLine & Environment.NewLine & mensajeError, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
+            ModuloRecursos.LimpiarCacheHuerfana(True)
             ConfigurarUiEstado(False)
         End Try
     End Sub
@@ -1074,7 +1138,7 @@ Public Class FormReparacion
             btnDetener.Text = "Deteniendo..."
             If cancelSource IsNot Nothing Then cancelSource.Cancel()
 
-            ' Matar procesos MuPDF activos
+            ' Matar únicamente procesos MuPDF activos de esta ventana
             For Each kvp In ProcesosConversion
                 Try
                     If Not kvp.Value.HasExited Then kvp.Value.Kill()
@@ -1082,6 +1146,7 @@ Public Class FormReparacion
                 End Try
             Next
             ProcesosConversion.Clear()
+            ModuloRecursos.LimpiarCacheHuerfana(True)
         End If
     End Sub
 
@@ -1171,6 +1236,7 @@ Public Class FormReparacion
                     Catch
                     End Try
                 Next
+                ModuloRecursos.LimpiarCacheHuerfana(True)
             Else
                 e.Cancel = True
             End If

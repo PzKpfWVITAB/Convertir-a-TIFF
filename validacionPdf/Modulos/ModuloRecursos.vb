@@ -269,33 +269,64 @@ Public Module ModuloRecursos
 
     ''' <summary>
     ''' Limpia archivos residuales y huérfanos de ejecuciones previas (magick-*, gs_*, mu_*, stg_*, .tmp, .cache)
-    ''' en la carpeta de staging para liberar espacio inmediatamente.
+    ''' en la carpeta de staging respetando estrictamente otras instancias activas en el mismo servidor.
     ''' </summary>
-    Public Sub LimpiarCacheHuerfana()
+    Public Sub LimpiarCacheHuerfana(Optional limpiarPropioProceso As Boolean = False)
         Try
             Dim rutaStaging = ObtenerRutaStaging()
             If Directory.Exists(rutaStaging) Then
                 Dim dirInfo As New DirectoryInfo(rutaStaging)
+                Dim pidActual As Integer = Process.GetCurrentProcess().Id
+                Dim umbralAntiguedad As DateTime = DateTime.Now.AddMinutes(-30)
 
-                ' Eliminar subcarpetas huérfanas temporales de ejecuciones anteriores
+                ' Eliminar únicamente subcarpetas huérfanas de procesos que ya no existen o muy antiguos
                 For Each subDir In dirInfo.GetDirectories()
                     Try
                         If subDir.Name.StartsWith("stg_", StringComparison.OrdinalIgnoreCase) OrElse
                            subDir.Name.StartsWith("gs_", StringComparison.OrdinalIgnoreCase) OrElse
                            subDir.Name.StartsWith("mu_", StringComparison.OrdinalIgnoreCase) Then
-                            subDir.Delete(True)
+
+                            Dim eliminar As Boolean = False
+                            Dim partes = subDir.Name.Split("_"c)
+                            Dim pidCarpeta As Integer = 0
+
+                            ' Formato esperado: mu_jpg_{PID}_{GUID} o mu_tiff_{PID}_{GUID}
+                            If partes.Length >= 4 AndAlso Integer.TryParse(partes(2), pidCarpeta) AndAlso pidCarpeta > 0 Then
+                                If pidCarpeta = pidActual Then
+                                    eliminar = limpiarPropioProceso OrElse (subDir.LastWriteTime < umbralAntiguedad)
+                                Else
+                                    ' Verificar si la otra instancia sigue viva en Windows
+                                    Dim otroProcesoVivo As Boolean = False
+                                    Try
+                                        Dim p = Process.GetProcessById(pidCarpeta)
+                                        otroProcesoVivo = (p IsNot Nothing AndAlso Not p.HasExited)
+                                    Catch
+                                        otroProcesoVivo = False
+                                    End Try
+                                    ' Solo borrar si el proceso dueño ya murió
+                                    eliminar = Not otroProcesoVivo
+                                End If
+                            Else
+                                ' Carpetas sin PID: borrar solo si llevan más de 30 minutos sin modificarse
+                                eliminar = (subDir.LastWriteTime < umbralAntiguedad)
+                            End If
+
+                            If eliminar Then
+                                subDir.Delete(True)
+                            End If
                         End If
                     Catch
                     End Try
                 Next
 
-                ' Eliminar archivos de caché huérfanos (.cache, .tmp, magick-*)
+                ' Eliminar archivos sueltos de caché huérfanos (.cache, .tmp, magick-*) solo si son antiguos (>30 min)
                 For Each fi In dirInfo.GetFiles()
                     Try
-                        If fi.Name.StartsWith("magick-", StringComparison.OrdinalIgnoreCase) OrElse
-                           fi.Extension.Equals(".cache", StringComparison.OrdinalIgnoreCase) OrElse
-                           fi.Extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase) OrElse
-                           fi.Extension.Equals(".png", StringComparison.OrdinalIgnoreCase) Then
+                        If (fi.Name.StartsWith("magick-", StringComparison.OrdinalIgnoreCase) OrElse
+                            fi.Extension.Equals(".cache", StringComparison.OrdinalIgnoreCase) OrElse
+                            fi.Extension.Equals(".tmp", StringComparison.OrdinalIgnoreCase) OrElse
+                            fi.Extension.Equals(".png", StringComparison.OrdinalIgnoreCase)) AndAlso
+                           fi.LastWriteTime < umbralAntiguedad Then
                             fi.Delete()
                         End If
                     Catch

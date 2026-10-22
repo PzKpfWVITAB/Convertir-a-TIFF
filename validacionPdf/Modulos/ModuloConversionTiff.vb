@@ -119,7 +119,7 @@ Public Module ModuloConversionTiff
 
     ''' <summary>
     ''' Inspecciona el archivo binario del PDF en busca del catálogo /Pages con /Count
-    ''' o del conteo de ocurrencias de /Type /Page en ~1ms por salto SMB.
+    ''' en ~1ms por salto SMB.
     ''' </summary>
     Private Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
         Try
@@ -262,8 +262,12 @@ Public Module ModuloConversionTiff
     End Function
 
     ''' <summary>
-    ''' Verificación física ultrarrápida de diagnóstico para archivos TIFF:
-    ''' Revisa conteo de archivos, cabecera de la primera página y cabecera de la última página.
+    ''' Verificación física ultrarrápida para diagnóstico y posconversión de archivos TIFF:
+    ''' Usa DirectoryInfo.GetFiles en una sola llamada SMB para comprobar:
+    ''' 1. Conteo exacto de archivos.
+    ''' 2. Existencia de toda la secuencia {nombreBase}_1.tiff .. {nombreBase}_N.tiff en RAM (0 llamadas extra).
+    ''' 3. Que ninguna página intermedia ni extrema tenga 0 bytes (menor a 16 bytes).
+    ''' 4. Cabecera mágica TIFF 6.0 ("II*" o "MM*") de la primera y última página.
     ''' </summary>
     Public Function ValidarIntegridadDiagnosticoRapidoTiff(
         carpetaDestino As String,
@@ -272,7 +276,8 @@ Public Module ModuloConversionTiff
         ByRef mensajeError As String
     ) As Boolean
         Try
-            If Not Directory.Exists(carpetaDestino) Then
+            Dim di As New DirectoryInfo(carpetaDestino)
+            If Not di.Exists Then
                 mensajeError = "La carpeta de destino no existe físicamente."
                 Return False
             End If
@@ -282,25 +287,33 @@ Public Module ModuloConversionTiff
                 Return False
             End If
 
-            Dim archivosTiff = Directory.GetFiles(carpetaDestino, "*.tiff")
-            If archivosTiff.Length <> totalPaginasEsperadas Then
-                mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosTiff.Length} imágenes TIFF."
+            ' 1 sola llamada SMB que trae nombres y tamaños en bytes de todos los archivos TIFF de la carpeta
+            Dim archivosInfo = di.GetFiles("*.tiff")
+            If archivosInfo.Length <> totalPaginasEsperadas Then
+                mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosInfo.Length} imágenes TIFF."
                 Return False
             End If
+
+            Dim mapaArchivos As New Dictionary(Of String, Long)(archivosInfo.Length, StringComparer.OrdinalIgnoreCase)
+            For Each fi In archivosInfo
+                If fi.Length < 16 Then
+                    mensajeError = $"La página '{fi.Name}' está vacía o truncada ({fi.Length} bytes)."
+                    Return False
+                End If
+                mapaArchivos(fi.Name) = fi.Length
+            Next
+
+            ' Verificar que exista la secuencia consecutiva completa 1..N en RAM (0 llamadas SMB)
+            For i As Integer = 1 To totalPaginasEsperadas
+                Dim nomEsperado = $"{nombreBase}_{i}.tiff"
+                If Not mapaArchivos.ContainsKey(nomEsperado) Then
+                    mensajeError = $"Falta la página física requerida: {nomEsperado}"
+                    Return False
+                End If
+            Next
 
             ' Verificar página inicial (página 1)
             Dim pagInicial = Path.Combine(carpetaDestino, $"{nombreBase}_1.tiff")
-            If Not File.Exists(pagInicial) Then
-                mensajeError = $"Falta la página inicial física: {nombreBase}_1.tiff"
-                Return False
-            End If
-
-            Dim fiIni As New FileInfo(pagInicial)
-            If fiIni.Length < 16 Then
-                mensajeError = $"La página inicial está vacía o incompleta ({fiIni.Length} bytes)."
-                Return False
-            End If
-
             Using fs As New FileStream(pagInicial, FileMode.Open, FileAccess.Read, FileShare.Read)
                 Dim h(3) As Byte
                 If fs.Read(h, 0, 4) < 4 Then
@@ -318,17 +331,6 @@ Public Module ModuloConversionTiff
             ' Si tiene más de una página, verificar la página final para confirmar que no se cortó la escritura
             If totalPaginasEsperadas > 1 Then
                 Dim pagFinal = Path.Combine(carpetaDestino, $"{nombreBase}_{totalPaginasEsperadas}.tiff")
-                If Not File.Exists(pagFinal) Then
-                    mensajeError = $"Falta la página final física: {nombreBase}_{totalPaginasEsperadas}.tiff"
-                    Return False
-                End If
-
-                Dim fiFin As New FileInfo(pagFinal)
-                If fiFin.Length < 16 Then
-                    mensajeError = $"La página final está vacía o incompleta ({fiFin.Length} bytes)."
-                    Return False
-                End If
-
                 Using fs As New FileStream(pagFinal, FileMode.Open, FileAccess.Read, FileShare.Read)
                     Dim h(3) As Byte
                     If fs.Read(h, 0, 4) < 4 Then
@@ -396,36 +398,38 @@ Public Module ModuloConversionTiff
                 If Not Directory.Exists(carpetaPdfDestino) Then Return False
             End If
 
-            ' 2. Conteo de archivos TIFF en la carpeta destino
-            Dim archivosTiff = Directory.GetFiles(carpetaPdfDestino, "*.tiff")
-            Dim conteoDestino = archivosTiff.Length
-            If conteoDestino = 0 Then Return False
-
-            ' 3. Determinar páginas esperadas desde el índice de origen en memoria (O(1))
+            ' 2. Determinar páginas esperadas desde el índice en memoria o BD (con estatus OK)
             Dim paginasEsperadas As Integer = 0
             If mapaIndice IsNot Nothing Then
                 Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
-                If mapaIndice.TryGetValue(archivoPdf, infoIndice) Then
-                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
-                ElseIf mapaIndice.TryGetValue(Path.GetFileName(archivoPdf), infoIndice) Then
-                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
+                If mapaIndice.TryGetValue(archivoPdf, infoIndice) AndAlso infoIndice.Paginas > 0 Then
+                    paginasEsperadas = infoIndice.Paginas
+                ElseIf mapaIndice.TryGetValue(Path.GetFileName(archivoPdf), infoIndice) AndAlso infoIndice.Paginas > 0 Then
+                    paginasEsperadas = infoIndice.Paginas
                 End If
             End If
 
-            ' Si no estaba en el índice pero se proporciona mapa de BD
-            If paginasEsperadas <= 0 AndAlso mapaBd IsNot Nothing Then
-                Dim infoBd As InfoRegistroBd = Nothing
-                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso infoBd.Paginas > 0 Then
-                        paginasEsperadas = infoBd.Paginas
+            Dim infoBd As InfoRegistroBd = Nothing
+            If mapaBd IsNot Nothing Then
+                Dim carpetaDestKey = carpetaPdfDestino.TrimEnd("\"c, "/"c)
+                If Not mapaBd.TryGetValue(carpetaDestKey, infoBd) Then
+                    If Not mapaBd.TryGetValue(archivoPdf, infoBd) Then
+                        If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
+                            mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd)
+                        End If
                     End If
                 End If
+
+                If paginasEsperadas <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Encontrado AndAlso
+                   String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
+                    paginasEsperadas = infoBd.Paginas
+                End If
             End If
 
-            ' Si conocemos las páginas esperadas (por el índice o BD):
-            ' Si el conteo coincide exactamente, está completo. Retorno inmediato O(1) sin re-escanear disco ni abrir SMB.
-            If paginasEsperadas > 0 Then
-                If conteoDestino = paginasEsperadas Then
+            ' 3. Si conocemos las páginas esperadas por BD/Índice y el estatus en BD ya es OK:
+            If paginasEsperadas > 0 AndAlso infoBd IsNot Nothing AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) Then
+                Dim archivosTiff = Directory.GetFiles(carpetaPdfDestino, "*.tiff")
+                If archivosTiff.Length = paginasEsperadas Then
                     totalPaginas = paginasEsperadas
                     Return True
                 Else
@@ -433,11 +437,21 @@ Public Module ModuloConversionTiff
                 End If
             End If
 
-            totalPaginas = conteoDestino
+            ' 4. Si la carpeta destino existe pero NO tenía registro OK en BD (o el índice tiene Paginas=0):
+            ' Es OBLIGATORIO leer las páginas reales del PDF de origen (1ms por regex binario) para jamás asumir un corte parcial como completo
+            If paginasEsperadas <= 0 Then
+                paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
+            End If
 
-            ' 4. Fallback solo si el archivo NO estaba indexado: verificación física rápida
+            If paginasEsperadas <= 0 Then Return False
+
             Dim dummyError As String = ""
-            Return ValidarIntegridadDiagnosticoRapidoTiff(carpetaPdfDestino, nombreSinExt, totalPaginas, dummyError)
+            If ValidarIntegridadDiagnosticoRapidoTiff(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError) Then
+                totalPaginas = paginasEsperadas
+                Return True
+            End If
+
+            Return False
         Catch
             Return False
         End Try
@@ -530,7 +544,8 @@ Public Module ModuloConversionTiff
         End If
 
         Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
-        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "mu_tiff_" & Guid.NewGuid().ToString("N"))
+        Dim pidActual = Process.GetCurrentProcess().Id
+        Dim stagingCarpeta = Path.Combine(rutaStagingBase, $"mu_tiff_{pidActual}_{Guid.NewGuid():N}")
         Directory.CreateDirectory(stagingCarpeta)
 
         Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
@@ -675,6 +690,10 @@ Public Module ModuloConversionTiff
                 Throw New IOException("MuPDF terminó pero no se generaron archivos TIFF válidos en la etapa local.")
             End If
 
+            If paginasEsperadas > 0 AndAlso tiffsLocales.Length <> paginasEsperadas Then
+                Throw New IOException($"Discrepancia en staging local: el PDF tiene {paginasEsperadas} páginas pero solo se generaron {tiffsLocales.Length} imágenes TIFF.")
+            End If
+
             ' Asegurar la carpeta de destino en almacenamiento de forma segura
             If Not Directory.Exists(carpetaDestino) Then
                 Directory.CreateDirectory(carpetaDestino)
@@ -775,7 +794,7 @@ Public Module ModuloConversionTiff
     End Function
 
     ''' <summary>
-    ''' Resuelve la ruta destino efectiva respetando entregables.
+    ''' Resuelve la ruta destino efectiva respetando entregables (unificado con la lógica oficial de entregables).
     ''' </summary>
     Public Function ResolverDestinoEfectivo(origen As String, destino As String) As String
         Try
@@ -798,7 +817,12 @@ Public Module ModuloConversionTiff
                 Return destino
             End If
 
-            Return Path.Combine(destino, subCarpetaDestino)
+            Dim esEntregable = mEntrega.Success OrElse Regex.IsMatch(nombreOrigen, "^ENTREGABLE[\s_-]*(\d+.*)$", RegexOptions.IgnoreCase)
+            If esEntregable Then
+                Return Path.Combine(destino, subCarpetaDestino)
+            End If
+
+            Return destino
         Catch ex As Exception
             Return destino
         End Try
@@ -818,7 +842,7 @@ Public Module ModuloConversionTiff
     ''' <summary>
     ''' Cadena de conexión activa para MySQL en stellumdb.
     ''' </summary>
-    Public Property CadenaConexionMysql As String = "server=127.0.0.1;port=3307;user id=appuser;password=1234;database=stellumdb;ConnectionTimeout=3;Pooling=true;MinPoolSize=1;MaxPoolSize=10;"
+    Public Property CadenaConexionMysql As String = "server=127.0.0.1;port=3307;user id=appuser;password=1234;database=stellumdb;ConnectionTimeout=15;DefaultCommandTimeout=60;Pooling=true;MinPoolSize=2;MaxPoolSize=60;"
 
     ''' <summary>
     ''' Comprueba si el servidor MySQL está accesible.
@@ -853,7 +877,7 @@ Public Module ModuloConversionTiff
                 Dim tabla = NombreTablaBitacora
                 Dim sql = $"SELECT estatus, paginas, error, fecha FROM {tabla} " &
                           "WHERE (documento = @nom1 OR documento = @nom2 OR nombre_original = @nom1 OR nombre_original = @nom2) " &
-                          "ORDER BY id DESC LIMIT 1"
+                          "ORDER BY CASE WHEN estatus = 'OK' THEN 0 ELSE 1 END ASC, id DESC LIMIT 1"
                 Using cmd As New MySqlCommand(sql, conn)
                     cmd.Parameters.AddWithValue("@nom1", nombreSinExt)
                     cmd.Parameters.AddWithValue("@nom2", nombreConExt)
@@ -878,7 +902,7 @@ Public Module ModuloConversionTiff
 
     ''' <summary>
     ''' Carga masivamente todos los registros de la bitácora TIFF en un diccionario en memoria (O(1)).
-    ''' Evita hacer 100,000 conexiones individuales a la base de datos, acelerando el análisis de horas a segundos.
+    ''' Indexa tanto por ruta completa de carpeta destino / origen como por nombre de documento para evitar colisiones de homónimos.
     ''' </summary>
     Public Function CargarDiccionarioBitacoraEnMemoria() As Dictionary(Of String, InfoRegistroBd)
         Dim dict As New Dictionary(Of String, InfoRegistroBd)(StringComparer.OrdinalIgnoreCase)
@@ -886,13 +910,17 @@ Public Module ModuloConversionTiff
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
-                Dim sql = $"SELECT documento, nombre_original, estatus, paginas, error FROM {tabla} ORDER BY id ASC"
+                ' Ordenar de modo que los registros con estatus OK prevalezcan siempre al final
+                Dim sql = $"SELECT documento, nombre_original, carpeta_origen, carpeta_destino, estatus, paginas, error FROM {tabla} " &
+                          "ORDER BY CASE WHEN estatus = 'OK' THEN 1 ELSE 0 END ASC, id ASC"
                 Using cmd As New MySqlCommand(sql, conn)
                     cmd.CommandTimeout = 120
                     Using dr = cmd.ExecuteReader()
                         While dr.Read()
                             Dim doc = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim())
                             Dim orig = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim())
+                            Dim carpOrig = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim())
+                            Dim carpDest = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim())
                             Dim info As New InfoRegistroBd With {
                                 .Encontrado = True,
                                 .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
@@ -900,6 +928,15 @@ Public Module ModuloConversionTiff
                                 .ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString().Trim())
                             }
 
+                            If Not String.IsNullOrEmpty(carpDest) Then
+                                dict(carpDest.TrimEnd("\"c, "/"c)) = info
+                            End If
+                            If Not String.IsNullOrEmpty(carpOrig) AndAlso Not String.IsNullOrEmpty(orig) Then
+                                Try
+                                    dict(Path.Combine(carpOrig, Path.GetFileName(orig))) = info
+                                Catch
+                                End Try
+                            End If
                             If Not String.IsNullOrEmpty(doc) Then
                                 dict(doc) = info
                                 dict(Path.GetFileNameWithoutExtension(doc)) = info
@@ -938,17 +975,20 @@ Public Module ModuloConversionTiff
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
 
-                ' Primero intentar actualizar si ya existía para mantener la base de datos limpia y cuadrada
                 Dim sqlUpdate = $"UPDATE {tabla} SET " &
                                 "estatus = 'OK', paginas = @pag, error = '', usuario = @usr, fecha = NOW(), " &
-                                "carpeta_destino = @dest WHERE documento = @doc OR nombre_original = @orig"
+                                "carpeta_destino = @dest " &
+                                "WHERE carpeta_destino = @dest " &
+                                "OR (carpeta_origen = @origen AND (documento = @doc OR documento = @orig OR documento = @nuevo OR nombre_original = @orig OR nombre_original = @nuevo))"
                 Dim filasActualizadas As Integer = 0
                 Using cmdUpdate As New MySqlCommand(sqlUpdate, conn)
                     cmdUpdate.Parameters.AddWithValue("@pag", paginas)
                     cmdUpdate.Parameters.AddWithValue("@usr", usuario)
                     cmdUpdate.Parameters.AddWithValue("@dest", carpetaDestino)
+                    cmdUpdate.Parameters.AddWithValue("@origen", carpetaOrigen)
                     cmdUpdate.Parameters.AddWithValue("@doc", documento)
                     cmdUpdate.Parameters.AddWithValue("@orig", nombreOriginal)
+                    cmdUpdate.Parameters.AddWithValue("@nuevo", nombreNuevo)
                     filasActualizadas = cmdUpdate.ExecuteNonQuery()
                 End Using
 
@@ -972,7 +1012,6 @@ Public Module ModuloConversionTiff
                 End If
             End Using
         Catch ex As Exception
-            ' Fallback asíncrono
             ModuloBitacoraAsync.EncolarTransferenciaTiff(
                 disk, carpetaOrigen, carpetaDestino, documento, nombreOriginal, nombreNuevo, "", "OK", paginas, delegacion, usuario, anio
             )
@@ -991,12 +1030,61 @@ Public Module ModuloConversionTiff
     End Class
 
     ''' <summary>
-    ''' Obtiene todos los registros de la bitácora que coinciden con una carpeta origen (para análisis bidireccional y detección de huérfanos/duplicados).
+    ''' Comprueba de forma exacta si un registro de BD pertenece realmente a la carpeta origen analizada,
+    ''' evitando falsos positivos como 'ENTREGABLE 1' haciendo match con 'ENTREGABLE 10'.
     ''' </summary>
-    Public Function ObtenerRegistrosBitacoraPorCarpeta(filtroCarpeta As String) As List(Of RegistroDetalleBd)
+    Private Function PerteneceACarpetaOrigen(carpetaOrigenBd As String, diskBd As String, rutaOrigenCompleta As String, nombreCarpetaFinal As String) As Boolean
+        Dim origNorm = rutaOrigenCompleta.Trim().TrimEnd("\"c, "/"c)
+
+        If Not String.IsNullOrEmpty(carpetaOrigenBd) Then
+            Dim cNorm = carpetaOrigenBd.Trim().TrimEnd("\"c, "/"c)
+            If cNorm.Equals(origNorm, StringComparison.OrdinalIgnoreCase) OrElse
+               cNorm.StartsWith(origNorm & "\", StringComparison.OrdinalIgnoreCase) OrElse
+               cNorm.StartsWith(origNorm & "/", StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        End If
+
+        If Not String.IsNullOrEmpty(diskBd) Then
+            Dim dNorm = diskBd.Trim().TrimEnd("\"c, "/"c)
+            If dNorm.Equals(origNorm, StringComparison.OrdinalIgnoreCase) OrElse
+               dNorm.StartsWith(origNorm & "\", StringComparison.OrdinalIgnoreCase) OrElse
+               dNorm.StartsWith(origNorm & "/", StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        End If
+
+        ' Verificación por segmento exacto de ruta (para que 'ENTREGABLE 1' coincida solo con el segmento 'ENTREGABLE 1' y jamás con 'ENTREGABLE 10')
+        If Not String.IsNullOrEmpty(nombreCarpetaFinal) Then
+            Dim sep = New Char() {"\"c, "/"c}
+            If Not String.IsNullOrEmpty(carpetaOrigenBd) Then
+                Dim segmentos = carpetaOrigenBd.Split(sep, StringSplitOptions.RemoveEmptyEntries)
+                If segmentos.Any(Function(s) s.Trim().Equals(nombreCarpetaFinal, StringComparison.OrdinalIgnoreCase)) Then
+                    Return True
+                End If
+            End If
+            If Not String.IsNullOrEmpty(diskBd) Then
+                Dim segmentosDisk = diskBd.Split(sep, StringSplitOptions.RemoveEmptyEntries)
+                If segmentosDisk.Any(Function(s) s.Trim().Equals(nombreCarpetaFinal, StringComparison.OrdinalIgnoreCase)) Then
+                    Return True
+                End If
+            End If
+        End If
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Obtiene todos los registros de la bitácora que coinciden exactamente con la carpeta origen (para análisis bidireccional y detección de huérfanos/duplicados).
+    ''' </summary>
+    Public Function ObtenerRegistrosBitacoraPorCarpeta(rutaCarpetaOrigen As String) As List(Of RegistroDetalleBd)
         Dim lista As New List(Of RegistroDetalleBd)()
-        If String.IsNullOrWhiteSpace(filtroCarpeta) Then Return lista
+        If String.IsNullOrWhiteSpace(rutaCarpetaOrigen) Then Return lista
         Try
+            Dim origenNorm = rutaCarpetaOrigen.Trim().TrimEnd("\"c, "/"c)
+            Dim nombreCarpeta = Path.GetFileName(origenNorm)
+            Dim filtroSql = If(Not String.IsNullOrEmpty(nombreCarpeta), nombreCarpeta, origenNorm)
+
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
@@ -1004,19 +1092,24 @@ Public Module ModuloConversionTiff
                           $"FROM {tabla} WHERE carpeta_origen LIKE @filtro OR disk LIKE @filtro"
                 Using cmd As New MySqlCommand(sql, conn)
                     cmd.CommandTimeout = 120
-                    cmd.Parameters.AddWithValue("@filtro", "%" & filtroCarpeta & "%")
+                    cmd.Parameters.AddWithValue("@filtro", "%" & filtroSql & "%")
                     Using dr = cmd.ExecuteReader()
                         While dr.Read()
-                            lista.Add(New RegistroDetalleBd With {
-                                .Id = Convert.ToInt64(dr("id")),
-                                .Documento = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim()),
-                                .NombreOriginal = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim()),
-                                .CarpetaOrigen = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim()),
-                                .CarpetaDestino = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim()),
-                                .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
-                                .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
-                                .Fecha = If(IsDBNull(dr("fecha")), DateTime.MinValue, Convert.ToDateTime(dr("fecha")))
-                            })
+                            Dim carpOrig = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim())
+                            Dim diskVal = If(IsDBNull(dr("disk")), "", dr("disk").ToString().Trim())
+
+                            If PerteneceACarpetaOrigen(carpOrig, diskVal, origenNorm, nombreCarpeta) Then
+                                lista.Add(New RegistroDetalleBd With {
+                                    .Id = Convert.ToInt64(dr("id")),
+                                    .Documento = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim()),
+                                    .NombreOriginal = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim()),
+                                    .CarpetaOrigen = carpOrig,
+                                    .CarpetaDestino = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim()),
+                                    .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
+                                    .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
+                                    .Fecha = If(IsDBNull(dr("fecha")), DateTime.MinValue, Convert.ToDateTime(dr("fecha")))
+                                })
+                            End If
                         End While
                     End Using
                 End Using

@@ -50,11 +50,10 @@ Public Class FormTransferir
     Private Shared ReadOnly ProcesosActivos As New ConcurrentDictionary(Of Integer, Process)()
 
     ''' <summary>
-    ''' Mata de forma inmediata y fulminante todos los subprocesos de conversión en segundo plano
-    ''' (Ghostscript, MuPDF), liberando instantáneamente la CPU, RAM y los bloqueos de archivos en disco.
+    ''' Mata de forma inmediata y fulminante los subprocesos de conversión activos pertenecientes a ESTA instancia,
+    ''' sin afectar otras instancias en ejecución simultánea en el servidor.
     ''' </summary>
     Public Shared Sub MatarTodosLosProcesosDeConversion()
-        ' 1. Matar procesos registrados en nuestra lista
         For Each kvp In ProcesosActivos
             Try
                 Dim p = kvp.Value
@@ -65,20 +64,6 @@ Public Class FormTransferir
             End Try
         Next
         ProcesosActivos.Clear()
-
-        ' 2. Barrido complementario de procesos por nombre en Windows
-        Dim nombresProcesos = {"gswin64c", "gswin32c", "gs", "mutool"}
-        For Each nom In nombresProcesos
-            Try
-                For Each p In Process.GetProcessesByName(nom)
-                    Try
-                        p.Kill()
-                    Catch
-                    End Try
-                Next
-            Catch
-            End Try
-        Next
     End Sub
 
     Public Class TransferData
@@ -91,7 +76,7 @@ Public Class FormTransferir
 
         ' Aplicar configuración dinámica de límites de hardware y búfer de staging
         ModuloRecursos.AplicarLimitesMagickNET()
-        ModuloRecursos.LimpiarCacheHuerfana()
+        ModuloRecursos.LimpiarCacheHuerfana(False)
 
         ' DETECTOR E INSTALADOR AUTOMÁTICO DE MUPDF (OBLIGATORIO Y EXCLUSIVO)
         Dim mupdfListo = ModuloRecursos.AsegurarMuPdfInstalado(Me)
@@ -429,8 +414,8 @@ Public Class FormTransferir
         ' 2. Limpieza inmediata de todas las carpetas destino incompletas en vuelo
         LimpiarTodosLosIncompletosEnVuelo()
 
-        ' 3. Limpieza inmediata de cachés y carpetas temporales
-        ModuloRecursos.LimpiarCacheHuerfana()
+        ' 3. Limpieza inmediata de cachés y carpetas temporales de esta instancia
+        ModuloRecursos.LimpiarCacheHuerfana(True)
 
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | CANCELACIÓN COMPLETADA | Subprocesos cerrados y temporales eliminados.")
     End Sub
@@ -528,8 +513,8 @@ Public Class FormTransferir
 
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | INICIO | Motor exclusivo: MuPDF Extremo ({Path.GetFileName(rutaMu)}) | Origen: {origen} | Destino efectivo: {destinoEfectivo} | Hilos paralelos dinámicos: {maxHilos}")
 
-        ' Limpieza proactiva de cualquier residuo o caché huérfana antes de iniciar
-        ModuloRecursos.LimpiarCacheHuerfana()
+        ' Limpieza proactiva de residuos huérfanos antiguos sin afectar otras instancias activas
+        ModuloRecursos.LimpiarCacheHuerfana(False)
 
         ' =========================================================================
         ' FASE DE PRE-VERIFICACIÓN: Detectar PDFs ya procesados completos en destino
@@ -544,6 +529,7 @@ Public Class FormTransferir
         Dim bagPendientes As New ConcurrentBag(Of FileInfo)()
         Dim bagOmitidos As New ConcurrentBag(Of KeyValuePair(Of String, Integer))()
         Dim contadorChequeados As Integer = 0
+        Dim usuarioPrecheck = If(ModuloUsuarios.UsuarioActual IsNot Nothing, ModuloUsuarios.UsuarioActual.NombreUsuario, Environment.UserName)
 
         Dim hilosPrechequeo = Math.Max(4, Math.Min(Environment.ProcessorCount * 2, ModuloRecursos.ObtenerHilosRedOptimos()))
         Dim poptPrechequeo As New ParallelOptions With {
@@ -560,6 +546,44 @@ Public Class FormTransferir
             Dim pagsCompletas As Integer = 0
             If EstaPdfYaProcesadoYCompleto(origen, destinoEfectivo, archivoInfo.FullName, pagsCompletas, cacheDirectoriosDestino, mapaIndiceOrigen, mapaBdTransfer) Then
                 bagOmitidos.Add(New KeyValuePair(Of String, Integer)(archivoInfo.FullName, pagsCompletas))
+
+                ' Auto-sanación de BD: si está 100% completo en disco pero faltaba su confirmación OK en BD, registrarlo
+                Dim yaEnBdOk As Boolean = False
+                Dim nomSinExt = Path.GetFileNameWithoutExtension(archivoInfo.FullName)
+                Dim rutaRel = ObtenerRutaRelativa(origen, archivoInfo.FullName)
+                Dim dirRel = NormalizarRutaRelativa(Path.GetDirectoryName(rutaRel))
+                Dim carpDest = Path.Combine(destinoEfectivo, dirRel, nomSinExt)
+
+                If mapaBdTransfer IsNot Nothing Then
+                    Dim infoBd As ModuloConversionTiff.InfoRegistroBd = Nothing
+                    If mapaBdTransfer.TryGetValue(carpDest.TrimEnd("\"c, "/"c), infoBd) OrElse
+                       mapaBdTransfer.TryGetValue(archivoInfo.FullName, infoBd) OrElse
+                       mapaBdTransfer.TryGetValue(nomSinExt, infoBd) OrElse
+                       mapaBdTransfer.TryGetValue(archivoInfo.Name, infoBd) Then
+                        If infoBd IsNot Nothing AndAlso infoBd.Encontrado AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) Then
+                            yaEnBdOk = True
+                        End If
+                    End If
+                End If
+
+                If Not yaEnBdOk AndAlso pagsCompletas > 0 Then
+                    Dim mAnio = System.Text.RegularExpressions.Regex.Match(nomSinExt, "\b(19\d{2}|20\d{2})\b")
+                    Dim anioStr = If(mAnio.Success, mAnio.Value, Nothing)
+                    ModuloBitacoraAsync.EncolarTransferenciaTiff(
+                        origen,
+                        Path.GetDirectoryName(archivoInfo.FullName),
+                        carpDest,
+                        archivoInfo.FullName,
+                        archivoInfo.Name,
+                        nomSinExt,
+                        "",
+                        "OK",
+                        pagsCompletas,
+                        delegacionSeleccionada,
+                        usuarioPrecheck,
+                        anioStr
+                    )
+                End If
             Else
                 bagPendientes.Add(archivoInfo)
             End If
@@ -619,8 +643,9 @@ Public Class FormTransferir
             End If
         End If
 
-        ' Si todos los archivos ya están completos, terminar inmediatamente
+        ' Si todos los archivos ya están completos, terminar inmediatamente asegurando vaciado de bitácora
         If totalPendientes = 0 Then
+            ModuloBitacoraAsync.EsperarVaciado(15000)
             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
                 bgWorker.ReportProgress(100, $"Todos los archivos ({total:#,##0}) ya están completos en destino | Finalizado sin pendientes")
             End If
@@ -707,7 +732,7 @@ Public Class FormTransferir
                             End If
 
                             Dim paginas As Integer = 0
-                            Dim pesoMB As Double = fileAProcesar.Length / (1024.0 * 1024.0)
+                            Dim pesoMB As Double = obtenerPesoBytes(fileAProcesar) / (1024.0 * 1024.0)
                             Dim nombreSinExt = Path.GetFileNameWithoutExtension(fileAProcesar.FullName)
 
                             If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
@@ -747,15 +772,15 @@ Public Class FormTransferir
             LimpiarTodosLosIncompletosEnVuelo()
         End If
 
-        ' Esperar brevemente que la cola de bitácora termine de insertar solo lo completado
-        ModuloBitacoraAsync.EsperarVaciado(2500)
-        ModuloRecursos.LimpiarCacheHuerfana()
+        ' Esperar que la cola de bitácora confirme todas las transacciones en MySQL
+        ModuloBitacoraAsync.EsperarVaciado(15000)
+        ModuloRecursos.LimpiarCacheHuerfana(True)
         EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | FIN PROCESO | Origen: {origen} | Destino efectivo: {destinoEfectivo} | Cancelado: {canceladoPorUsuario}")
     End Sub
 
     ''' <summary>
-    ''' Procesa un único archivo PDF: gestiona rutas relativas, llamadas de conversión, verificación física,
-    ''' registro en base de datos y bitácora, y limpieza inmediata de carpetas incompletas en caso de fallo.
+    ''' Procesa un único archivo PDF con hasta 3 reintentos automáticos ante microcortes o errores transitorios de I/O:
+    ''' gestiona rutas relativas, llamadas de conversión, verificación física, registro en BD y limpieza de incompletos.
     ''' </summary>
     Private Function ProcesarUnArchivoPdf(
         fileInfo As FileInfo,
@@ -773,7 +798,11 @@ Public Class FormTransferir
         Dim paginas As Integer = 0
         Dim carpetaPdfDestino As String = ""
         Dim archivoCompletadoConExito As Boolean = False
-        Dim pesoMB As Double = fileInfo.Length / (1024.0 * 1024.0)
+        Dim pesoMB As Double = 0
+        Try
+            pesoMB = fileInfo.Length / (1024.0 * 1024.0)
+        Catch
+        End Try
 
         If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
             Return "CANCELADO"
@@ -806,27 +835,74 @@ Public Class FormTransferir
                 Throw New InvalidOperationException("El motor MuPDF (mutool.exe) no está instalado y no se pudo obtener automáticamente.")
             End If
 
-            ConvertirPdfTiffMuPdf(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
-            totalPaginas = paginas
+            Dim maxIntentos As Integer = 3
+            Dim ultimoErrorDetalle As String = ""
 
-            ' Verificar que no se haya cancelado durante la escritura
-            If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+            For intento As Integer = 1 To maxIntentos
+                If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                    LimpiarCarpetaIncompleta(carpetaPdfDestino)
+                    Return "CANCELADO"
+                End If
+
+                Try
+                    If intento > 1 Then
+                        ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaPdfDestino)
+                    End If
+
+                    paginas = 0
+                    ConvertirPdfTiffMuPdf(archivo, carpetaPdfDestino, nombreSinExt, paginas, cancelToken, procesarPaginasEnParalelo, hilosParalelos)
+                    totalPaginas = paginas
+
+                    ' Verificar que no se haya cancelado durante la escritura
+                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                        LimpiarCarpetaIncompleta(carpetaPdfDestino)
+                        Return "CANCELADO"
+                    End If
+
+                    ' VERIFICACIÓN FÍSICA RÁPIDA DE INTEGRIDAD Y NÚMERO DE PÁGINAS TIFF
+                    Dim errorVerificacion As String = ""
+                    Dim esValidoFisicamente = ValidarIntegridadFisicaTiff(carpetaPdfDestino, nombreSinExt, paginas, errorVerificacion)
+
+                    If esValidoFisicamente AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
+                        estatusFinal = "OK"
+                        archivoCompletadoConExito = True
+                        Exit For
+                    Else
+                        ultimoErrorDetalle = If(Not String.IsNullOrEmpty(errorVerificacion), errorVerificacion, "Verificación física fallida")
+                        archivoCompletadoConExito = False
+                        ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaPdfDestino)
+                    End If
+
+                Catch exOp As OperationCanceledException
+                    LimpiarCarpetaIncompleta(carpetaPdfDestino)
+                    Return "CANCELADO"
+                Catch exIntento As Exception
+                    If canceladoPorUsuario OrElse cancelToken.IsCancellationRequested Then
+                        LimpiarCarpetaIncompleta(carpetaPdfDestino)
+                        Return "CANCELADO"
+                    End If
+                    Dim det As String = exIntento.Message
+                    If TypeOf exIntento Is AggregateException Then
+                        Dim agg = DirectCast(exIntento, AggregateException).Flatten()
+                        det = String.Join(" | ", agg.InnerExceptions.Select(Function(ie) ie.GetType().Name & ": " & ie.Message))
+                    ElseIf exIntento.InnerException IsNot Nothing Then
+                        det &= " -> " & exIntento.InnerException.GetType().Name & ": " & exIntento.InnerException.Message
+                    End If
+                    ultimoErrorDetalle = det
+                    archivoCompletadoConExito = False
+                    ModuloConversionTiff.VaciarArchivosDeCarpeta(carpetaPdfDestino)
+                End Try
+
+                If Not archivoCompletadoConExito AndAlso intento < maxIntentos Then
+                    EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | REINTENTO {intento}/{maxIntentos} | {nombreSinExt} | Motivo previo: {ultimoErrorDetalle}")
+                    Thread.Sleep(500 * intento)
+                End If
+            Next
+
+            If Not archivoCompletadoConExito Then
                 LimpiarCarpetaIncompleta(carpetaPdfDestino)
-                Return "CANCELADO"
-            End If
-
-            ' VERIFICACIÓN FÍSICA RÁPIDA DE INTEGRIDAD Y NÚMERO DE PÁGINAS TIFF
-            Dim errorVerificacion As String = ""
-            Dim esValidoFisicamente = ValidarIntegridadFisicaTiff(carpetaPdfDestino, nombreSinExt, paginas, errorVerificacion)
-
-            If esValidoFisicamente AndAlso Not canceladoPorUsuario AndAlso Not cancelToken.IsCancellationRequested Then
-                estatusFinal = "OK"
-                archivoCompletadoConExito = True
-            Else
-                estatusFinal = If(Not String.IsNullOrEmpty(errorVerificacion), "ERROR: " & errorVerificacion, "ERROR: Verificación física fallida")
-                archivoCompletadoConExito = False
-                LimpiarCarpetaIncompleta(carpetaPdfDestino)
-                EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | VERIFICACIÓN FALLIDA | {nombreSinExt} | {estatusFinal}")
+                estatusFinal = "ERROR: " & ultimoErrorDetalle
+                EscribirLog($"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | ERROR DEFINITIVO TRAS {maxIntentos} INTENTOS | {nombreSinExt} | {ultimoErrorDetalle}")
             End If
 
             ' SÓLO SI EL ARCHIVO ESTÁ FÍSICAMENTE COMPLETO, VERIFICADO Y NO HUBO CANCELACIÓN SE REGISTRA EN BD
@@ -896,7 +972,11 @@ Public Class FormTransferir
         Optional hilosParalelos As Integer = 1
     )
         Dim callbackProgreso As Action(Of Integer, String) = Nothing
-        Dim pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
+        Dim pesoMB As Double = 0
+        Try
+            pesoMB = (New FileInfo(pdfPath).Length / (1024.0 * 1024.0))
+        Catch
+        End Try
         If bgWorker IsNot Nothing AndAlso bgWorker.WorkerReportsProgress Then
             callbackProgreso = Sub(pct, texto)
                                    bgWorker.ReportProgress(pct, $"STATUS|{texto} ({pesoMB:0.1} MB)")

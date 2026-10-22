@@ -337,10 +337,14 @@ Public Module ModuloIndiceOrigen
             finalizadoLectura = True
             autoResetEscritor.Set()
             Try
-                tareaEscritora.Wait(60000)
+                tareaEscritora.Wait()
             Catch
             End Try
         End Try
+
+        If errorEscritura IsNot Nothing Then
+            Throw New InvalidOperationException("Error al guardar el índice en la base de datos: " & errorEscritura.Message, errorEscritura)
+        End If
 
         Return ObtenerResumenIndice(origen)
     End Function
