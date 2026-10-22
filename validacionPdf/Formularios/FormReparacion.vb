@@ -1,4 +1,4 @@
-Imports System.Collections.Concurrent
+﻿Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Text
@@ -42,9 +42,11 @@ Public Class FormReparacion
     Private cancelSourceIndexar As CancellationTokenSource = Nothing
     Private estaIndexando As Boolean = False
 
-    Private Sub FormReparacion_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        Private Sub FormReparacion_Load(sender As Object, e As EventArgs) Handles MyBase.Load
         VerificarConexionBd()
         ActualizarResumenIndiceEnUi(txtOrigen.Text.Trim())
+        Dim hilosMax = ModuloRecursos.ObtenerHilosMaximaVelocidad()
+        chkMaximaVelocidad.Text = $"⚡ Máxima velocidad ({hilosMax} núcleos detectados)"
     End Sub
 
     Private Sub txtOrigen_TextChanged(sender As Object, e As EventArgs) Handles txtOrigen.TextChanged
@@ -117,7 +119,7 @@ Public Class FormReparacion
         cancelSourceIndexar = New CancellationTokenSource()
         Dim token = cancelSourceIndexar.Token
 
-        Dim hilos = ModuloRecursos.ObtenerHilosOptimos()
+        Dim hilos = If(chkMaximaVelocidad.Checked, ModuloRecursos.ObtenerHilosMaximaVelocidad(), ModuloRecursos.ObtenerHilosOptimos())
         Try
             Dim resumenFinal As ModuloIndiceOrigen.ResumenIndice = Nothing
             Await Task.Run(Function()
@@ -274,15 +276,16 @@ Public Class FormReparacion
         Dim totalIncompletos As Integer = 0
         Dim totalFaltantes As Integer = 0
         Dim totalCorrectos As Integer = 0
-        Dim swCronometroTotal = Diagnostics.Stopwatch.StartNew()
+                Dim swCronometroTotal = Diagnostics.Stopwatch.StartNew()
+        Dim usarMaxVelocidad As Boolean = chkMaximaVelocidad.Checked
+        Dim numHilos As Integer = If(usarMaxVelocidad, ModuloRecursos.ObtenerHilosMaximaVelocidad(), ModuloRecursos.ObtenerHilosRedOptimos())
 
         Try
             Await Task.Run(Sub()
-                               ' 1. Cargar la base de datos completa y el índice en memoria en UN SOLO VIAJE (O(1))
-                               Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice y base de datos en memoria para máxima velocidad...")
-                               Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
-                               Dim mapaIndice = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
-                               Dim numHilos = ModuloRecursos.ObtenerHilosRedOptimos()
+                                ' 1. Cargar la base de datos completa y el índice en memoria en UN SOLO VIAJE (O(1))
+                                Me.BeginInvoke(Sub() lblStatus.Text = "Cargando índice y base de datos en memoria para máxima velocidad...")
+                                Dim mapaBd = ModuloConversionJpg.CargarDiccionarioBitacoraEnMemoria()
+                                Dim mapaIndice = ModuloIndiceOrigen.CargarIndiceDirectorio(origen)
 
                                ' 2. Obtener lista de archivos PDF en origen (del índice en memoria si existe, o escaneo paralelo a 48 núcleos)
                                Dim archivosPdf As String() = Nothing
