@@ -1,4 +1,5 @@
 Imports System.Collections.Concurrent
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Text
 Imports System.Text.RegularExpressions
@@ -20,17 +21,15 @@ Public Module ModuloConversionJpg
     ''' <summary>
     ''' Obtiene rápidamente el número total de páginas de un PDF sin descomprimirlo en RAM.
     ''' Implementa múltiples motores de alta resiliencia:
-    ''' 1. iText 7 con modo permisivo (UnethicalReading = True).
+    ''' 1. Inspección binaria directa de cabecera/trailer (/Count N) en 1 ms.
     ''' 2. MuPDF CLI (mutool show -r 'archivo.pdf' pages) capaz de auto-reparar en memoria.
-    ''' 3. Conteo binario por expresiones regulares (/Type /Page o /Count).
+    ''' 3. iText 7 con modo permisivo (UnethicalReading = True).
     ''' 4. ImageMagick Ping.
     ''' </summary>
     Public Function ObtenerTotalPaginasPdf(rutaPdf As String) As Integer
         If String.IsNullOrWhiteSpace(rutaPdf) OrElse Not File.Exists(rutaPdf) Then Return 0
 
         ' 1. INTENTO ULTRARRÁPIDO EN 1 MS: Inspección binaria directa de cabecera/trailer (/Count N)
-        ' Lee únicamente 64-128 KB en un solo salto SMB sin parsear fuentes ni objetos pesados.
-        ' Resuelve el 95%+ de los PDFs en ~1-2 ms (en lugar de 300 ms de iText o procesos externos).
         Try
             Dim pagsBin = ObtenerPaginasPdfPorRegex(rutaPdf)
             If pagsBin > 0 Then Return pagsBin
@@ -55,7 +54,6 @@ Public Module ModuloConversionJpg
                 End Using
             End Using
         Catch exIText As Exception
-            ' Continuar con siguiente motor si iText falla
         End Try
 
         ' 4. Intento con ImageMagick (Ping de metadatos)
@@ -103,7 +101,6 @@ Public Module ModuloConversionJpg
                     Return 0
                 End If
 
-                ' Buscar patrones "page 1 =", "page 2 =", etc.
                 Dim matches = Regex.Matches(salida, "(?im)^\s*page\s+(\d+)\s*=")
                 If matches.Count > 0 Then
                     Dim maxPag As Integer = 0
@@ -123,14 +120,13 @@ Public Module ModuloConversionJpg
 
     ''' <summary>
     ''' Inspecciona el archivo binario del PDF en busca del catálogo /Pages con /Count
-    ''' o del conteo de ocurrencias de /Type /Page en ~1ms por salto SMB.
+    ''' en ~1ms por salto SMB.
     ''' </summary>
     Private Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
         Try
             Dim fi As New FileInfo(rutaPdf)
             If fi.Length = 0 Then Return 0
 
-            ' Leer los primeros 128 KB en busca de /Type /Pages ... /Count N o viceversa
             Dim tamLectura = Math.Min(CInt(fi.Length), 131072)
             Dim buffer(tamLectura - 1) As Byte
 
@@ -142,7 +138,6 @@ Public Module ModuloConversionJpg
                     If pags > 0 Then Return pags
                 End If
 
-                ' Si no está en el encabezado, leer los últimos 128 KB (zona de tráiler y catálogo xref)
                 If fi.Length > tamLectura Then
                     Dim tamTrailer = Math.Min(CInt(fi.Length), 131072)
                     Dim bufferTrailer(tamTrailer - 1) As Byte
@@ -163,21 +158,18 @@ Public Module ModuloConversionJpg
     Private Function ExtraerCountDeTexto(texto As String) As Integer
         If String.IsNullOrEmpty(texto) Then Return 0
 
-        ' 1. /Type /Pages ... /Count N
         Dim m = Regex.Match(texto, "/Type\s*/Pages\b[\s\S]{0,1000}?/Count\s+(\d+)")
         If m.Success Then
             Dim c As Integer
             If Integer.TryParse(m.Groups(1).Value, c) AndAlso c > 0 Then Return c
         End If
 
-        ' 2. /Count N ... /Type /Pages
         m = Regex.Match(texto, "/Count\s+(\d+)[\s\S]{0,1000}?/Type\s*/Pages\b")
         If m.Success Then
             Dim c As Integer
             If Integer.TryParse(m.Groups(1).Value, c) AndAlso c > 0 Then Return c
         End If
 
-        ' 3. Estructura compacta /Pages ... /Count N
         m = Regex.Match(texto, "/Pages\b[^>]*?/Count\s+(\d+)")
         If m.Success Then
             Dim c As Integer
@@ -192,7 +184,7 @@ Public Module ModuloConversionJpg
     ''' 1. Que la carpeta destino exista.
     ''' 2. Que el conteo físico de archivos JPG coincida exactamente con las páginas esperadas.
     ''' 3. Que cada archivo consecutivo ({nombreBase}_{i}.jpg) exista físicamente en disco.
-    ''' 4. Que ningún archivo esté vacío (tamaño > 100 bytes).
+    ''' 4. Que ningún archivo esté vacío (tamaño >= 100 bytes).
     ''' 5. Que la cabecera mágica corresponda a JPEG (FF D8 FF).
     ''' 6. Que la imagen sea completamente legible (validación rápida con MagickImageInfo).
     ''' </summary>
@@ -213,16 +205,13 @@ Public Module ModuloConversionJpg
                 Return False
             End If
 
-            ' 1. Obtener todos los archivos JPG en la carpeta destino
             Dim archivosJpg = Directory.GetFiles(carpetaDestino, "*.jpg")
 
-            ' 2. Validación estricta de cantidad
             If archivosJpg.Length <> totalPaginasEsperadas Then
                 mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosJpg.Length} imágenes JPG."
                 Return False
             End If
 
-            ' 3. Validación archivo por archivo de cada página esperada
             For i As Integer = 1 To totalPaginasEsperadas
                 Dim archivoEsperado = Path.Combine(carpetaDestino, $"{nombreBase}_{i}.jpg")
 
@@ -237,7 +226,6 @@ Public Module ModuloConversionJpg
                     Return False
                 End If
 
-                ' 4. Verificación de Magic Bytes JPG (FF D8 FF)
                 Using fs As New FileStream(archivoEsperado, FileMode.Open, FileAccess.Read, FileShare.Read)
                     Dim header(2) As Byte
                     Dim leidos = fs.Read(header, 0, 3)
@@ -247,7 +235,6 @@ Public Module ModuloConversionJpg
                     End If
                 End Using
 
-                ' 5. Validación rápida de estructura con ImageMagick (Ping de metadatos)
                 Try
                     Dim info As New MagickImageInfo(archivoEsperado)
                     If info.Width <= 0 OrElse info.Height <= 0 Then
@@ -270,8 +257,12 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
-    ''' Validación ultrarrápida para diagnóstico en red: comprueba conteo exacto de archivos y verifica
-    ''' las cabeceras de la primera y última página en ~1ms, evitando cientos de llamadas SMB por documento.
+    ''' Validación ultrarrápida para diagnóstico y posconversión en red:
+    ''' Usa DirectoryInfo.GetFiles en una sola llamada SMB para comprobar:
+    ''' 1. Conteo exacto de archivos.
+    ''' 2. Existencia de toda la secuencia {nombreBase}_1.jpg .. {nombreBase}_N.jpg en RAM (0 llamadas extra).
+    ''' 3. Que ninguna página intermedia ni extrema tenga 0 bytes (menor a 100 bytes).
+    ''' 4. Cabecera mágica JPEG (FF D8 FF) de la primera y última página.
     ''' </summary>
     Public Function ValidarIntegridadDiagnosticoRapidoJpg(
         carpetaDestino As String,
@@ -280,7 +271,8 @@ Public Module ModuloConversionJpg
         ByRef mensajeError As String
     ) As Boolean
         Try
-            If Not Directory.Exists(carpetaDestino) Then
+            Dim di As New DirectoryInfo(carpetaDestino)
+            If Not di.Exists Then
                 mensajeError = "La carpeta de destino no existe físicamente."
                 Return False
             End If
@@ -290,25 +282,33 @@ Public Module ModuloConversionJpg
                 Return False
             End If
 
-            Dim archivosJpg = Directory.GetFiles(carpetaDestino, "*.jpg")
-            If archivosJpg.Length <> totalPaginasEsperadas Then
-                mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosJpg.Length} imágenes JPG."
+            ' 1 sola llamada SMB que trae nombres y tamaños en bytes de todos los archivos de la carpeta
+            Dim archivosInfo = di.GetFiles("*.jpg")
+            If archivosInfo.Length <> totalPaginasEsperadas Then
+                mensajeError = $"Discrepancia en páginas físicas: esperadas {totalPaginasEsperadas}, encontradas {archivosInfo.Length} imágenes JPG."
                 Return False
             End If
 
-            ' Verificar página inicial (página 1)
+            Dim mapaArchivos As New Dictionary(Of String, Long)(archivosInfo.Length, StringComparer.OrdinalIgnoreCase)
+            For Each fi In archivosInfo
+                If fi.Length < 100 Then
+                    mensajeError = $"La página '{fi.Name}' está vacía o truncada ({fi.Length} bytes)."
+                    Return False
+                End If
+                mapaArchivos(fi.Name) = fi.Length
+            Next
+
+            ' Verificar que exista la secuencia consecutiva completa 1..N en RAM (0 llamadas SMB)
+            For i As Integer = 1 To totalPaginasEsperadas
+                Dim nomEsperado = $"{nombreBase}_{i}.jpg"
+                If Not mapaArchivos.ContainsKey(nomEsperado) Then
+                    mensajeError = $"Falta la página física requerida: {nomEsperado}"
+                    Return False
+                End If
+            Next
+
+            ' Verificar cabecera binaria de página inicial (página 1)
             Dim pagInicial = Path.Combine(carpetaDestino, $"{nombreBase}_1.jpg")
-            If Not File.Exists(pagInicial) Then
-                mensajeError = $"Falta la página inicial física: {nombreBase}_1.jpg"
-                Return False
-            End If
-
-            Dim fiIni As New FileInfo(pagInicial)
-            If fiIni.Length < 100 Then
-                mensajeError = $"La página inicial está vacía o incompleta ({fiIni.Length} bytes)."
-                Return False
-            End If
-
             Using fs As New FileStream(pagInicial, FileMode.Open, FileAccess.Read, FileShare.Read)
                 Dim h(2) As Byte
                 If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
@@ -317,20 +317,9 @@ Public Module ModuloConversionJpg
                 End If
             End Using
 
-            ' Si tiene más de una página, verificar la página final para confirmar que no se cortó la escritura
+            ' Si tiene más de una página, verificar cabecera binaria de la página final
             If totalPaginasEsperadas > 1 Then
                 Dim pagFinal = Path.Combine(carpetaDestino, $"{nombreBase}_{totalPaginasEsperadas}.jpg")
-                If Not File.Exists(pagFinal) Then
-                    mensajeError = $"Falta la página final física: {nombreBase}_{totalPaginasEsperadas}.jpg"
-                    Return False
-                End If
-
-                Dim fiFin As New FileInfo(pagFinal)
-                If fiFin.Length < 100 Then
-                    mensajeError = $"La página final está vacía o incompleta ({fiFin.Length} bytes)."
-                    Return False
-                End If
-
                 Using fs As New FileStream(pagFinal, FileMode.Open, FileAccess.Read, FileShare.Read)
                     Dim h(2) As Byte
                     If fs.Read(h, 0, 3) < 3 OrElse h(0) <> &HFF OrElse h(1) <> &HD8 OrElse h(2) <> &HFF Then
@@ -385,45 +374,45 @@ Public Module ModuloConversionJpg
                     End Function, LazyThreadSafetyMode.ExecutionAndPublication)
                 End Function)
 
-                ' Si la subcarpeta con el nombre del PDF no está en el HashSet del padre, descartar al instante (0 ms, 0 SMB)
                 If Not lazySet.Value.Contains(nombreSinExt) Then
                     Return False
                 End If
             Else
-                ' Si no se pasa caché, verificar en disco directamente
                 If Not Directory.Exists(carpetaPdfDestino) Then Return False
             End If
 
-            ' 2. Conteo de archivos JPG en la carpeta destino
-            Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
-            Dim conteoDestino = archivosJpg.Length
-            If conteoDestino = 0 Then Return False
-
-            ' 3. Determinar páginas esperadas desde el índice de origen en memoria (O(1))
+            ' 2. Determinar páginas esperadas desde el índice en memoria o BD (con estatus OK)
             Dim paginasEsperadas As Integer = 0
             If mapaIndice IsNot Nothing Then
                 Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
-                If mapaIndice.TryGetValue(archivoPdf, infoIndice) Then
-                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
-                ElseIf mapaIndice.TryGetValue(Path.GetFileName(archivoPdf), infoIndice) Then
-                    If infoIndice.Paginas > 0 Then paginasEsperadas = infoIndice.Paginas
+                If mapaIndice.TryGetValue(archivoPdf, infoIndice) AndAlso infoIndice.Paginas > 0 Then
+                    paginasEsperadas = infoIndice.Paginas
+                ElseIf mapaIndice.TryGetValue(Path.GetFileName(archivoPdf), infoIndice) AndAlso infoIndice.Paginas > 0 Then
+                    paginasEsperadas = infoIndice.Paginas
                 End If
             End If
 
-            ' Si no estaba en el índice pero se proporciona mapa de BD
-            If paginasEsperadas <= 0 AndAlso mapaBd IsNot Nothing Then
-                Dim infoBd As InfoRegistroBd = Nothing
-                If mapaBd.TryGetValue(nombreSinExt, infoBd) OrElse mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd) Then
-                    If infoBd.Encontrado AndAlso infoBd.Paginas > 0 Then
-                        paginasEsperadas = infoBd.Paginas
+            Dim infoBd As InfoRegistroBd = Nothing
+            If mapaBd IsNot Nothing Then
+                Dim carpetaDestKey = carpetaPdfDestino.TrimEnd("\"c, "/"c)
+                If Not mapaBd.TryGetValue(carpetaDestKey, infoBd) Then
+                    If Not mapaBd.TryGetValue(archivoPdf, infoBd) Then
+                        If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
+                            mapaBd.TryGetValue(Path.GetFileName(archivoPdf), infoBd)
+                        End If
                     End If
                 End If
+
+                If paginasEsperadas <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Encontrado AndAlso
+                   String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) AndAlso infoBd.Paginas > 0 Then
+                    paginasEsperadas = infoBd.Paginas
+                End If
             End If
 
-            ' Si conocemos las páginas esperadas (por el índice o BD):
-            ' Si el conteo coincide exactamente, está completo. Retorno inmediato O(1) sin re-escanear disco ni abrir SMB.
-            If paginasEsperadas > 0 Then
-                If conteoDestino = paginasEsperadas Then
+            ' 3. Si conocemos las páginas esperadas por BD/Índice y el estatus en BD ya es OK:
+            If paginasEsperadas > 0 AndAlso infoBd IsNot Nothing AndAlso String.Equals(infoBd.Estatus, "OK", StringComparison.OrdinalIgnoreCase) Then
+                Dim archivosJpg = Directory.GetFiles(carpetaPdfDestino, "*.jpg")
+                If archivosJpg.Length = paginasEsperadas Then
                     totalPaginas = paginasEsperadas
                     Return True
                 Else
@@ -431,11 +420,21 @@ Public Module ModuloConversionJpg
                 End If
             End If
 
-            totalPaginas = conteoDestino
+            ' 4. Si la carpeta destino existe pero NO tenía registro OK en BD (o el índice tiene Paginas=0):
+            ' Es OBLIGATORIO leer las páginas reales del PDF de origen (1ms por regex binario) para jamás asumir un corte parcial como completo
+            If paginasEsperadas <= 0 Then
+                paginasEsperadas = ObtenerTotalPaginasPdf(archivoPdf)
+            End If
 
-            ' 4. Fallback solo si el archivo NO estaba indexado: verificación física
+            If paginasEsperadas <= 0 Then Return False
+
             Dim dummyError As String = ""
-            Return ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, totalPaginas, dummyError)
+            If ValidarIntegridadDiagnosticoRapidoJpg(carpetaPdfDestino, nombreSinExt, paginasEsperadas, dummyError) Then
+                totalPaginas = paginasEsperadas
+                Return True
+            End If
+
+            Return False
         Catch
             Return False
         End Try
@@ -472,7 +471,8 @@ Public Module ModuloConversionJpg
         End If
 
         Dim rutaStagingBase = ModuloRecursos.ObtenerRutaStaging()
-        Dim stagingCarpeta = Path.Combine(rutaStagingBase, "mu_jpg_" & Guid.NewGuid().ToString("N"))
+        Dim pidActual = Process.GetCurrentProcess().Id
+        Dim stagingCarpeta = Path.Combine(rutaStagingBase, $"mu_jpg_{pidActual}_{Guid.NewGuid():N}")
         Directory.CreateDirectory(stagingCarpeta)
 
         Dim paginasEsperadas = ObtenerTotalPaginasPdf(pdfPath)
@@ -614,6 +614,10 @@ Public Module ModuloConversionJpg
                 Throw New IOException("MuPDF terminó pero no se generaron archivos JPG válidos en la etapa local.")
             End If
 
+            If paginasEsperadas > 0 AndAlso jpgsLocales.Length <> paginasEsperadas Then
+                Throw New IOException($"Discrepancia en staging local: el PDF tiene {paginasEsperadas} páginas pero solo se generaron {jpgsLocales.Length} imágenes JPG.")
+            End If
+
             ' Asegurar la carpeta de destino en almacenamiento de forma segura
             If Not Directory.Exists(carpetaDestino) Then
                 Directory.CreateDirectory(carpetaDestino)
@@ -650,18 +654,12 @@ Public Module ModuloConversionJpg
                     End Try
                 Next
 
-                If Not copiado AndAlso ultimoEx IsNot Nothing Then
-                    Throw New IOException($"Error al transferir '{nomArchivo}' a destino: {ultimoEx.Message}", ultimoEx)
+                If Not copiado Then
+                    Throw New IOException($"Error al transferir '{nomArchivo}' a destino: " & If(ultimoEx IsNot Nothing, ultimoEx.Message, "Fallo de red SMB"), ultimoEx)
                 End If
             End Sub)
 
-            ' Validar archivos JPG generados en destino
-            Dim jpgGenerados = Directory.GetFiles(carpetaDestino, $"{nombreBase}_*.jpg")
-            If jpgGenerados.Length = 0 Then
-                Throw New IOException("No se encontraron archivos JPG en la carpeta destino final.")
-            End If
-
-            totalPaginas = jpgGenerados.Length
+            totalPaginas = jpgsLocales.Length
 
         Catch ex As OperationCanceledException
             VaciarArchivosDeCarpeta(carpetaDestino)
@@ -727,6 +725,7 @@ Public Module ModuloConversionJpg
             Dim archivos = Directory.GetFiles(carpetaDestino, "*.*")
             For Each f In archivos
                 Try
+                    File.SetAttributes(f, FileAttributes.Normal)
                     File.Delete(f)
                 Catch
                 End Try
@@ -759,7 +758,7 @@ Public Module ModuloConversionJpg
         End If
         Dim partes = directorioRelativo.Split(New Char() {Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar}, StringSplitOptions.None)
         For i As Integer = 0 To partes.Length - 1
-            Dim m = System.Text.RegularExpressions.Regex.Match(partes(i).Trim(), "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim m = Regex.Match(partes(i).Trim(), "^ENTREGA[\s_-]*(\d+.*)$", RegexOptions.IgnoreCase)
             If m.Success Then
                 partes(i) = "ENTREGABLE " & m.Groups(1).Value.Trim()
             End If
@@ -779,7 +778,7 @@ Public Module ModuloConversionJpg
             Dim nombreOrigen = Path.GetFileName(origen.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Trim()
             Dim subCarpetaDestino = nombreOrigen
 
-            Dim mEntrega = System.Text.RegularExpressions.Regex.Match(nombreOrigen, "^ENTREGA[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim mEntrega = Regex.Match(nombreOrigen, "^ENTREGA[\s_-]*(\d+.*)$", RegexOptions.IgnoreCase)
             If mEntrega.Success Then
                 subCarpetaDestino = "ENTREGABLE " & mEntrega.Groups(1).Value.Trim()
             End If
@@ -791,7 +790,7 @@ Public Module ModuloConversionJpg
                 Return destino
             End If
 
-            Dim esEntregable = mEntrega.Success OrElse System.Text.RegularExpressions.Regex.IsMatch(nombreOrigen, "^ENTREGABLE[\s_-]*(\d+.*)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim esEntregable = mEntrega.Success OrElse Regex.IsMatch(nombreOrigen, "^ENTREGABLE[\s_-]*(\d+.*)$", RegexOptions.IgnoreCase)
             If esEntregable Then
                 Return Path.Combine(destino, subCarpetaDestino)
             End If
@@ -816,7 +815,7 @@ Public Module ModuloConversionJpg
     ''' <summary>
     ''' Cadena de conexión activa para MySQL.
     ''' </summary>
-    Public Property CadenaConexionMysql As String = "server=127.0.0.1;port=3307;user id=appuser;password=1234;database=stellumdb;ConnectionTimeout=3;Pooling=true;MinPoolSize=1;MaxPoolSize=10;"
+    Public Property CadenaConexionMysql As String = "server=127.0.0.1;port=3307;user id=appuser;password=1234;database=stellumdb;ConnectionTimeout=15;DefaultCommandTimeout=60;Pooling=true;MinPoolSize=2;MaxPoolSize=60;"
 
     ''' <summary>
     ''' Comprueba si el servidor MySQL está accesible.
@@ -849,34 +848,24 @@ Public Module ModuloConversionJpg
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
-                Dim queryOk As Boolean = False
-
-                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
-                    Try
-                        Dim sql = $"SELECT estatus, paginas, error, fecha FROM {tbl} " &
-                                  "WHERE (documento = @nom1 OR documento = @nom2 OR nombre_original = @nom1 OR nombre_original = @nom2) " &
-                                  "ORDER BY id DESC LIMIT 1"
-                        Using cmd As New MySqlCommand(sql, conn)
-                            cmd.Parameters.AddWithValue("@nom1", nombreSinExt)
-                            cmd.Parameters.AddWithValue("@nom2", nombreConExt)
-                            Using dr = cmd.ExecuteReader()
-                                If dr.Read() Then
-                                    info.Encontrado = True
-                                    info.Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString())
-                                    info.Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas")))
-                                    info.ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString())
-                                    If Not IsDBNull(dr("fecha")) Then
-                                        info.Fecha = Convert.ToDateTime(dr("fecha"))
-                                    End If
-                                End If
-                            End Using
-                        End Using
-                        queryOk = True
-                        Exit For
-                    Catch exTbl As MySqlException When exTbl.Number = 1146
-                        ' Si la tabla no existe, probar con la siguiente tabla de compatibilidad
-                    End Try
-                Next
+                Dim sql = $"SELECT estatus, paginas, error, fecha FROM {tabla} " &
+                          "WHERE (documento = @nom1 OR documento = @nom2 OR nombre_original = @nom1 OR nombre_original = @nom2) " &
+                          "ORDER BY CASE WHEN estatus = 'OK' THEN 0 ELSE 1 END ASC, id DESC LIMIT 1"
+                Using cmd As New MySqlCommand(sql, conn)
+                    cmd.Parameters.AddWithValue("@nom1", nombreSinExt)
+                    cmd.Parameters.AddWithValue("@nom2", nombreConExt)
+                    Using dr = cmd.ExecuteReader()
+                        If dr.Read() Then
+                            info.Encontrado = True
+                            info.Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString())
+                            info.Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas")))
+                            info.ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString())
+                            If Not IsDBNull(dr("fecha")) Then
+                                info.Fecha = Convert.ToDateTime(dr("fecha"))
+                            End If
+                        End If
+                    End Using
+                End Using
             End Using
         Catch ex As Exception
             info.ErrorMsg = ex.Message
@@ -885,8 +874,8 @@ Public Module ModuloConversionJpg
     End Function
 
     ''' <summary>
-    ''' Carga masivamente todos los registros de la bitácora en un diccionario en memoria (O(1)).
-    ''' Evita hacer 100,000 conexiones individuales a la base de datos, acelerando el análisis de horas a segundos.
+    ''' Carga masivamente todos los registros de la bitácora JPG en un diccionario en memoria (O(1)).
+    ''' Indexa tanto por ruta completa de carpeta destino / origen como por nombre de documento para evitar colisiones de homónimos.
     ''' </summary>
     Public Function CargarDiccionarioBitacoraEnMemoria() As Dictionary(Of String, InfoRegistroBd)
         Dim dict As New Dictionary(Of String, InfoRegistroBd)(StringComparer.OrdinalIgnoreCase)
@@ -894,48 +883,53 @@ Public Module ModuloConversionJpg
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
+                ' Ordenar de modo que los registros con estatus OK prevalezcan siempre al final
+                Dim sql = $"SELECT documento, nombre_original, carpeta_origen, carpeta_destino, estatus, paginas, error FROM {tabla} " &
+                          "ORDER BY CASE WHEN estatus = 'OK' THEN 1 ELSE 0 END ASC, id ASC"
+                Using cmd As New MySqlCommand(sql, conn)
+                    cmd.CommandTimeout = 120
+                    Using dr = cmd.ExecuteReader()
+                        While dr.Read()
+                            Dim doc = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim())
+                            Dim orig = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim())
+                            Dim carpOrig = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim())
+                            Dim carpDest = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim())
+                            Dim info As New InfoRegistroBd With {
+                                .Encontrado = True,
+                                .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
+                                .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
+                                .ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString().Trim())
+                            }
 
-                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
-                    Try
-                        Dim sql = $"SELECT documento, nombre_original, estatus, paginas, error FROM {tbl} ORDER BY id ASC"
-                        Using cmd As New MySqlCommand(sql, conn)
-                            cmd.CommandTimeout = 120
-                            Using dr = cmd.ExecuteReader()
-                                While dr.Read()
-                                    Dim doc = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim())
-                                    Dim orig = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim())
-                                    Dim info As New InfoRegistroBd With {
-                                        .Encontrado = True,
-                                        .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
-                                        .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
-                                        .ErrorMsg = If(IsDBNull(dr("error")), "", dr("error").ToString().Trim())
-                                    }
-
-                                    If Not String.IsNullOrEmpty(doc) Then
-                                        dict(doc) = info
-                                        dict(Path.GetFileNameWithoutExtension(doc)) = info
-                                    End If
-                                    If Not String.IsNullOrEmpty(orig) Then
-                                        dict(orig) = info
-                                        dict(Path.GetFileNameWithoutExtension(orig)) = info
-                                    End If
-                                End While
-                            End Using
-                        End Using
-                        Exit For
-                    Catch exTbl As MySqlException When exTbl.Number = 1146
-                        ' Probar tabla alternativa
-                    End Try
-                Next
+                            If Not String.IsNullOrEmpty(carpDest) Then
+                                dict(carpDest.TrimEnd("\"c, "/"c)) = info
+                            End If
+                            If Not String.IsNullOrEmpty(carpOrig) AndAlso Not String.IsNullOrEmpty(orig) Then
+                                Try
+                                    dict(Path.Combine(carpOrig, Path.GetFileName(orig))) = info
+                                Catch
+                                End Try
+                            End If
+                            If Not String.IsNullOrEmpty(doc) Then
+                                dict(doc) = info
+                                dict(Path.GetFileNameWithoutExtension(doc)) = info
+                            End If
+                            If Not String.IsNullOrEmpty(orig) Then
+                                dict(orig) = info
+                                dict(Path.GetFileNameWithoutExtension(orig)) = info
+                            End If
+                        End While
+                    End Using
+                End Using
             End Using
         Catch ex As Exception
-            Debug.WriteLine("Error al cargar diccionario masivo de BD: " & ex.Message)
+            Debug.WriteLine("Error al cargar diccionario masivo de BD (JPG): " & ex.Message)
         End Try
         Return dict
     End Function
 
     ''' <summary>
-    ''' Registra o actualiza en la base de datos MySQL el archivo procesado/reparado con estatus OK.
+    ''' Registra o actualiza en la base de datos MySQL el archivo procesado/reparado con estatus OK en bitacora_transferencia_jpg.
     ''' </summary>
     Public Sub RegistrarExitoEnBd(
         disk As String,
@@ -954,48 +948,43 @@ Public Module ModuloConversionJpg
                 conn.Open()
                 Dim tabla = NombreTablaBitacora
 
-                For Each tbl In {tabla, "bitacora_transferencia_tiff"}
-                    Try
-                        ' Primero intentar actualizar si ya existía para mantener la base de datos limpia y cuadrada
-                        Dim sqlUpdate = $"UPDATE {tbl} SET " &
-                                        "estatus = 'OK', paginas = @pag, error = '', usuario = @usr, fecha = NOW(), " &
-                                        "carpeta_destino = @dest WHERE documento = @doc OR nombre_original = @orig"
-                        Dim filasActualizadas As Integer = 0
-                        Using cmdUpdate As New MySqlCommand(sqlUpdate, conn)
-                            cmdUpdate.Parameters.AddWithValue("@pag", paginas)
-                            cmdUpdate.Parameters.AddWithValue("@usr", usuario)
-                            cmdUpdate.Parameters.AddWithValue("@dest", carpetaDestino)
-                            cmdUpdate.Parameters.AddWithValue("@doc", documento)
-                            cmdUpdate.Parameters.AddWithValue("@orig", nombreOriginal)
-                            filasActualizadas = cmdUpdate.ExecuteNonQuery()
-                        End Using
+                Dim sqlUpdate = $"UPDATE {tabla} SET " &
+                                "estatus = 'OK', paginas = @pag, error = '', usuario = @usr, fecha = NOW(), " &
+                                "carpeta_destino = @dest " &
+                                "WHERE carpeta_destino = @dest " &
+                                "OR (carpeta_origen = @origen AND (documento = @doc OR documento = @orig OR documento = @nuevo OR nombre_original = @orig OR nombre_original = @nuevo))"
+                Dim filasActualizadas As Integer = 0
+                Using cmdUpdate As New MySqlCommand(sqlUpdate, conn)
+                    cmdUpdate.Parameters.AddWithValue("@pag", paginas)
+                    cmdUpdate.Parameters.AddWithValue("@usr", usuario)
+                    cmdUpdate.Parameters.AddWithValue("@dest", carpetaDestino)
+                    cmdUpdate.Parameters.AddWithValue("@origen", carpetaOrigen)
+                    cmdUpdate.Parameters.AddWithValue("@doc", documento)
+                    cmdUpdate.Parameters.AddWithValue("@orig", nombreOriginal)
+                    cmdUpdate.Parameters.AddWithValue("@nuevo", nombreNuevo)
+                    filasActualizadas = cmdUpdate.ExecuteNonQuery()
+                End Using
 
-                        If filasActualizadas = 0 Then
-                            Dim sqlInsert = $"INSERT INTO {tbl} " &
-                                            "(disk, carpeta_origen, carpeta_destino, documento, nombre_original, nombre_nuevo, error, estatus, paginas, delegacion, usuario, anio, fecha) " &
-                                            "VALUES (@disk, @origen, @destino, @doc, @orig, @nuevo, '', 'OK', @pag, @deleg, @usr, @anio, NOW())"
-                            Using cmdInsert As New MySqlCommand(sqlInsert, conn)
-                                cmdInsert.Parameters.AddWithValue("@disk", disk)
-                                cmdInsert.Parameters.AddWithValue("@origen", carpetaOrigen)
-                                cmdInsert.Parameters.AddWithValue("@destino", carpetaDestino)
-                                cmdInsert.Parameters.AddWithValue("@doc", documento)
-                                cmdInsert.Parameters.AddWithValue("@orig", nombreOriginal)
-                                cmdInsert.Parameters.AddWithValue("@nuevo", nombreNuevo)
-                                cmdInsert.Parameters.AddWithValue("@pag", paginas)
-                                cmdInsert.Parameters.AddWithValue("@deleg", delegacion)
-                                cmdInsert.Parameters.AddWithValue("@usr", usuario)
-                                cmdInsert.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(anio), DBNull.Value, CObj(anio)))
-                                cmdInsert.ExecuteNonQuery()
-                            End Using
-                        End If
-                        Exit For
-                    Catch exTbl As MySqlException When exTbl.Number = 1146
-                        ' Si la tabla no existe, probar con la alternativa
-                    End Try
-                Next
+                If filasActualizadas = 0 Then
+                    Dim sqlInsert = $"INSERT INTO {tabla} " &
+                                    "(disk, carpeta_origen, carpeta_destino, documento, nombre_original, nombre_nuevo, error, estatus, paginas, delegacion, usuario, anio, fecha) " &
+                                    "VALUES (@disk, @origen, @destino, @doc, @orig, @nuevo, '', 'OK', @pag, @deleg, @usr, @anio, NOW())"
+                    Using cmdInsert As New MySqlCommand(sqlInsert, conn)
+                        cmdInsert.Parameters.AddWithValue("@disk", disk)
+                        cmdInsert.Parameters.AddWithValue("@origen", carpetaOrigen)
+                        cmdInsert.Parameters.AddWithValue("@destino", carpetaDestino)
+                        cmdInsert.Parameters.AddWithValue("@doc", documento)
+                        cmdInsert.Parameters.AddWithValue("@orig", nombreOriginal)
+                        cmdInsert.Parameters.AddWithValue("@nuevo", nombreNuevo)
+                        cmdInsert.Parameters.AddWithValue("@pag", paginas)
+                        cmdInsert.Parameters.AddWithValue("@deleg", delegacion)
+                        cmdInsert.Parameters.AddWithValue("@usr", usuario)
+                        cmdInsert.Parameters.AddWithValue("@anio", If(String.IsNullOrEmpty(anio), DBNull.Value, CObj(anio)))
+                        cmdInsert.ExecuteNonQuery()
+                    End Using
+                End If
             End Using
         Catch ex As Exception
-            ' Fallback asíncrono o bitácora local
             ModuloBitacoraAsync.EncolarTransferenciaJpg(
                 disk, carpetaOrigen, carpetaDestino, documento, nombreOriginal, nombreNuevo, "", "OK", paginas, delegacion, usuario, anio
             )
@@ -1014,43 +1003,92 @@ Public Module ModuloConversionJpg
     End Class
 
     ''' <summary>
-    ''' Obtiene todos los registros de la bitácora que coinciden con una carpeta origen (para análisis bidireccional y detección de huérfanos/duplicados).
+    ''' Comprueba de forma exacta si un registro de BD pertenece realmente a la carpeta origen analizada,
+    ''' evitando falsos positivos como 'ENTREGABLE 1' haciendo match con 'ENTREGABLE 10'.
     ''' </summary>
-    Public Function ObtenerRegistrosBitacoraPorCarpeta(filtroCarpeta As String) As List(Of RegistroDetalleBd)
+    Private Function PerteneceACarpetaOrigen(carpetaOrigenBd As String, diskBd As String, rutaOrigenCompleta As String, nombreCarpetaFinal As String) As Boolean
+        Dim origNorm = rutaOrigenCompleta.Trim().TrimEnd("\"c, "/"c)
+
+        If Not String.IsNullOrEmpty(carpetaOrigenBd) Then
+            Dim cNorm = carpetaOrigenBd.Trim().TrimEnd("\"c, "/"c)
+            If cNorm.Equals(origNorm, StringComparison.OrdinalIgnoreCase) OrElse
+               cNorm.StartsWith(origNorm & "\", StringComparison.OrdinalIgnoreCase) OrElse
+               cNorm.StartsWith(origNorm & "/", StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        End If
+
+        If Not String.IsNullOrEmpty(diskBd) Then
+            Dim dNorm = diskBd.Trim().TrimEnd("\"c, "/"c)
+            If dNorm.Equals(origNorm, StringComparison.OrdinalIgnoreCase) OrElse
+               dNorm.StartsWith(origNorm & "\", StringComparison.OrdinalIgnoreCase) OrElse
+               dNorm.StartsWith(origNorm & "/", StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        End If
+
+        ' Verificación por segmento exacto de ruta (para que 'ENTREGABLE 1' coincida solo con el segmento 'ENTREGABLE 1' y jamás con 'ENTREGABLE 10')
+        If Not String.IsNullOrEmpty(nombreCarpetaFinal) Then
+            Dim sep = New Char() {"\"c, "/"c}
+            If Not String.IsNullOrEmpty(carpetaOrigenBd) Then
+                Dim segmentos = carpetaOrigenBd.Split(sep, StringSplitOptions.RemoveEmptyEntries)
+                If segmentos.Any(Function(s) s.Trim().Equals(nombreCarpetaFinal, StringComparison.OrdinalIgnoreCase)) Then
+                    Return True
+                End If
+            End If
+            If Not String.IsNullOrEmpty(diskBd) Then
+                Dim segmentosDisk = diskBd.Split(sep, StringSplitOptions.RemoveEmptyEntries)
+                If segmentosDisk.Any(Function(s) s.Trim().Equals(nombreCarpetaFinal, StringComparison.OrdinalIgnoreCase)) Then
+                    Return True
+                End If
+            End If
+        End If
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Obtiene todos los registros de la bitácora que coinciden exactamente con la carpeta origen (para análisis bidireccional y detección de huérfanos/duplicados).
+    ''' </summary>
+    Public Function ObtenerRegistrosBitacoraPorCarpeta(rutaCarpetaOrigen As String) As List(Of RegistroDetalleBd)
         Dim lista As New List(Of RegistroDetalleBd)()
-        If String.IsNullOrWhiteSpace(filtroCarpeta) Then Return lista
+        If String.IsNullOrWhiteSpace(rutaCarpetaOrigen) Then Return lista
         Try
+            Dim origenNorm = rutaCarpetaOrigen.Trim().TrimEnd("\"c, "/"c)
+            Dim nombreCarpeta = Path.GetFileName(origenNorm)
+            Dim filtroSql = If(Not String.IsNullOrEmpty(nombreCarpeta), nombreCarpeta, origenNorm)
+
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
-                For Each tbl In {NombreTablaBitacora, "bitacora_transferencia_tiff"}
-                    Try
-                        Dim sql = $"SELECT id, documento, nombre_original, carpeta_origen, carpeta_destino, paginas, estatus, fecha " &
-                                  $"FROM {tbl} WHERE carpeta_origen LIKE @filtro OR disk LIKE @filtro"
-                        Using cmd As New MySqlCommand(sql, conn)
-                            cmd.CommandTimeout = 120
-                            cmd.Parameters.AddWithValue("@filtro", "%" & filtroCarpeta & "%")
-                            Using dr = cmd.ExecuteReader()
-                                While dr.Read()
-                                    lista.Add(New RegistroDetalleBd With {
-                                        .Id = Convert.ToInt64(dr("id")),
-                                        .Documento = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim()),
-                                        .NombreOriginal = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim()),
-                                        .CarpetaOrigen = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim()),
-                                        .CarpetaDestino = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim()),
-                                        .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
-                                        .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
-                                        .Fecha = If(IsDBNull(dr("fecha")), DateTime.MinValue, Convert.ToDateTime(dr("fecha")))
-                                    })
-                                End While
-                            End Using
-                        End Using
-                        Exit For
-                    Catch exTbl As MySqlException When exTbl.Number = 1146
-                    End Try
-                Next
+                Dim tabla = NombreTablaBitacora
+                Dim sql = $"SELECT id, documento, nombre_original, carpeta_origen, carpeta_destino, paginas, estatus, fecha " &
+                          $"FROM {tabla} WHERE carpeta_origen LIKE @filtro OR disk LIKE @filtro"
+                Using cmd As New MySqlCommand(sql, conn)
+                    cmd.CommandTimeout = 120
+                    cmd.Parameters.AddWithValue("@filtro", "%" & filtroSql & "%")
+                    Using dr = cmd.ExecuteReader()
+                        While dr.Read()
+                            Dim carpOrig = If(IsDBNull(dr("carpeta_origen")), "", dr("carpeta_origen").ToString().Trim())
+                            Dim diskVal = If(IsDBNull(dr("disk")), "", dr("disk").ToString().Trim())
+
+                            If PerteneceACarpetaOrigen(carpOrig, diskVal, origenNorm, nombreCarpeta) Then
+                                lista.Add(New RegistroDetalleBd With {
+                                    .Id = Convert.ToInt64(dr("id")),
+                                    .Documento = If(IsDBNull(dr("documento")), "", dr("documento").ToString().Trim()),
+                                    .NombreOriginal = If(IsDBNull(dr("nombre_original")), "", dr("nombre_original").ToString().Trim()),
+                                    .CarpetaOrigen = carpOrig,
+                                    .CarpetaDestino = If(IsDBNull(dr("carpeta_destino")), "", dr("carpeta_destino").ToString().Trim()),
+                                    .Paginas = If(IsDBNull(dr("paginas")), 0, Convert.ToInt32(dr("paginas"))),
+                                    .Estatus = If(IsDBNull(dr("estatus")), "", dr("estatus").ToString().Trim()),
+                                    .Fecha = If(IsDBNull(dr("fecha")), DateTime.MinValue, Convert.ToDateTime(dr("fecha")))
+                                })
+                            End If
+                        End While
+                    End Using
+                End Using
             End Using
         Catch ex As Exception
-            Debug.WriteLine("Error al obtener registros de bitácora por carpeta: " & ex.Message)
+            Debug.WriteLine("Error al obtener registros de bitácora por carpeta (JPG): " & ex.Message)
         End Try
         Return lista
     End Function
@@ -1063,20 +1101,16 @@ Public Module ModuloConversionJpg
         Try
             Using conn As New MySqlConnection(CadenaConexionMysql)
                 conn.Open()
-                For Each tbl In {NombreTablaBitacora, "bitacora_transferencia_tiff"}
-                    Try
-                        Dim sql = $"DELETE FROM {tbl} WHERE id = @id"
-                        Using cmd As New MySqlCommand(sql, conn)
-                            cmd.Parameters.AddWithValue("@id", idRegistro)
-                            Dim filas = cmd.ExecuteNonQuery()
-                            If filas > 0 Then Return True
-                        End Using
-                    Catch exTbl As MySqlException When exTbl.Number = 1146
-                    End Try
-                Next
+                Dim tabla = NombreTablaBitacora
+                Dim sql = $"DELETE FROM {tabla} WHERE id = @id"
+                Using cmd As New MySqlCommand(sql, conn)
+                    cmd.Parameters.AddWithValue("@id", idRegistro)
+                    Dim filas = cmd.ExecuteNonQuery()
+                    If filas > 0 Then Return True
+                End Using
             End Using
         Catch ex As Exception
-            Debug.WriteLine($"Error al eliminar registro {idRegistro} de bitácora: " & ex.Message)
+            Debug.WriteLine($"Error al eliminar registro {idRegistro} de bitácora (JPG): " & ex.Message)
         End Try
         Return False
     End Function
