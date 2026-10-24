@@ -109,7 +109,7 @@ Public Module ModuloConversionJpg
     ''' Cuenta páginas usando mutool.exe con el comando 'show -r "archivo.pdf" pages'.
     ''' Es extraordinariamente rápido (~2-5ms) y capaz de reparar tablas XREF corruptas en memoria.
     ''' </summary>
-    Private Function ObtenerPaginasPdfConMuPdf(rutaPdf As String) As Integer
+    Public Function ObtenerPaginasPdfConMuPdf(rutaPdf As String) As Integer
         Dim archivoTempCorto As String = Nothing
         Try
             Dim muExe = ModuloRecursos.ObtenerRutaEjecutableMuPdf()
@@ -174,7 +174,7 @@ Public Module ModuloConversionJpg
     ''' Inspecciona el archivo binario del PDF en busca del catálogo /Pages con /Count
     ''' en ~1ms por salto SMB.
     ''' </summary>
-    Private Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
+    Public Function ObtenerPaginasPdfPorRegex(rutaPdf As String) As Integer
         Try
             Dim rutaLarga = APrefijoRutaLarga(rutaPdf)
             Dim fi As New FileInfo(rutaLarga)
@@ -184,13 +184,7 @@ Public Module ModuloConversionJpg
             Dim buffer(tamLectura - 1) As Byte
 
             Using fs As New FileStream(rutaLarga, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-                Dim leidos = fs.Read(buffer, 0, tamLectura)
-                If leidos > 0 Then
-                    Dim textoInicio = Encoding.ASCII.GetString(buffer, 0, leidos)
-                    Dim pags = ExtraerCountDeTexto(textoInicio)
-                    If pags > 0 Then Return pags
-                End If
-
+                Dim pagsTrailer As Integer = 0
                 If fi.Length > tamLectura Then
                     Dim tamTrailer = Math.Min(CInt(fi.Length), 131072)
                     Dim bufferTrailer(tamTrailer - 1) As Byte
@@ -198,9 +192,23 @@ Public Module ModuloConversionJpg
                     Dim leidosTrailer = fs.Read(bufferTrailer, 0, tamTrailer)
                     If leidosTrailer > 0 Then
                         Dim textoTrailer = Encoding.ASCII.GetString(bufferTrailer, 0, leidosTrailer)
-                        Dim pagsTrailer = ExtraerCountDeTexto(textoTrailer)
-                        If pagsTrailer > 0 Then Return pagsTrailer
+                        pagsTrailer = ExtraerCountDeTexto(textoTrailer)
                     End If
+                End If
+
+                Dim pagsInicio As Integer = 0
+                Dim leidos = fs.Read(buffer, 0, tamLectura)
+                If leidos > 0 Then
+                    Dim textoInicio = Encoding.ASCII.GetString(buffer, 0, leidos)
+                    pagsInicio = ExtraerCountDeTexto(textoInicio)
+                End If
+
+                If pagsTrailer > 0 AndAlso pagsInicio > 0 Then
+                    Return Math.Max(pagsInicio, pagsTrailer)
+                ElseIf pagsTrailer > 0 Then
+                    Return pagsTrailer
+                ElseIf pagsInicio > 0 Then
+                    Return pagsInicio
                 End If
             End Using
         Catch
@@ -976,21 +984,31 @@ Public Module ModuloConversionJpg
                             }
 
                             If Not String.IsNullOrEmpty(carpDest) Then
-                                dict(carpDest.TrimEnd("\"c, "/"c)) = info
+                                Dim destNorm = carpDest.Replace("/"c, "\"c).TrimEnd("\"c)
+                                dict(destNorm) = info
                             End If
-                            If Not String.IsNullOrEmpty(carpOrig) AndAlso Not String.IsNullOrEmpty(orig) Then
-                                Try
-                                    dict(Path.Combine(carpOrig, Path.GetFileName(orig))) = info
-                                Catch
-                                End Try
+                            If Not String.IsNullOrEmpty(carpOrig) Then
+                                Dim origNorm = carpOrig.Replace("/"c, "\"c).TrimEnd("\"c)
+                                If Not String.IsNullOrEmpty(orig) Then
+                                    Try
+                                        Dim rutaCompOrig = Path.Combine(origNorm, Path.GetFileName(orig))
+                                        dict(rutaCompOrig) = info
+                                    Catch
+                                    End Try
+                                End If
+                                If Not String.IsNullOrEmpty(doc) Then
+                                    Try
+                                        Dim rutaCompDoc = Path.Combine(origNorm, Path.GetFileName(doc))
+                                        dict(rutaCompDoc) = info
+                                    Catch
+                                    End Try
+                                End If
                             End If
-                            If Not String.IsNullOrEmpty(doc) Then
-                                dict(doc) = info
-                                dict(Path.GetFileNameWithoutExtension(doc)) = info
+                            If Not String.IsNullOrEmpty(doc) AndAlso (doc.Contains("\"c) OrElse doc.Contains("/"c)) Then
+                                dict(doc.Replace("/"c, "\"c)) = info
                             End If
-                            If Not String.IsNullOrEmpty(orig) Then
-                                dict(orig) = info
-                                dict(Path.GetFileNameWithoutExtension(orig)) = info
+                            If Not String.IsNullOrEmpty(orig) AndAlso (orig.Contains("\"c) OrElse orig.Contains("/"c)) Then
+                                dict(orig.Replace("/"c, "\"c)) = info
                             End If
                         End While
                     End Using

@@ -374,10 +374,8 @@ Public Module ModuloIndiceOrigen
                             If Not IsDBNull(dr("fecha_mod")) Then info.FechaMod = Convert.ToDateTime(dr("fecha_mod"))
                             Dim rutaComp = dr("ruta_completa").ToString()
                             dict(rutaComp) = info
-                            Dim nomArch = Path.GetFileName(rutaComp)
-                            If Not String.IsNullOrEmpty(nomArch) AndAlso Not dict.ContainsKey(nomArch) Then
-                                dict(nomArch) = info
-                            End If
+                            Dim rutaNorm = rutaComp.Replace("/"c, "\"c)
+                            If Not dict.ContainsKey(rutaNorm) Then dict(rutaNorm) = info
                         End While
                     End Using
                 End Using
