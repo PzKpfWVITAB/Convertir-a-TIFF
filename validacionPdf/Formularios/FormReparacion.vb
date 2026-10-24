@@ -1,4 +1,4 @@
-﻿Imports System.Collections.Concurrent
+Imports System.Collections.Concurrent
 Imports System.ComponentModel
 Imports System.IO
 Imports System.Text
@@ -572,10 +572,11 @@ Public Class FormReparacion
         Dim pagsIndice As Integer = 0
         If mapaIndice IsNot Nothing Then
             Dim infoIndice As ModuloIndiceOrigen.InfoIndicePdf = Nothing
-            If mapaIndice.TryGetValue(rutaPdf, infoIndice) Then
+            Dim claveRuta = rutaPdf.Replace("/"c, "\"c)
+            If mapaIndice.TryGetValue(claveRuta, infoIndice) Then
                 pagsIndice = infoIndice.Paginas
                 item.TamanoBytes = infoIndice.Tamano
-            ElseIf mapaIndice.TryGetValue(item.Documento, infoIndice) Then
+            ElseIf mapaIndice.TryGetValue(rutaPdf, infoIndice) Then
                 pagsIndice = infoIndice.Paginas
                 item.TamanoBytes = infoIndice.Tamano
             End If
@@ -593,12 +594,12 @@ Public Class FormReparacion
             ' 1. Consulta ultrarrápida en memoria (O(1)) priorizando ruta exacta de carpeta destino/origen
             Dim infoBd As ModuloConversionTiff.InfoRegistroBd = Nothing
             If mapaBd IsNot Nothing Then
-                Dim claveDest = carpetaDestinoEsperada.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                Dim claveDest = carpetaDestinoEsperada.Replace("/"c, "\"c).TrimEnd("\"c)
                 If Not mapaBd.TryGetValue(claveDest, infoBd) Then
-                    If Not mapaBd.TryGetValue(rutaPdf, infoBd) Then
-                        If Not mapaBd.TryGetValue(nombreSinExt, infoBd) Then
-                            mapaBd.TryGetValue(item.Documento, infoBd)
-                        End If
+                    Dim claveRuta = rutaPdf.Replace("/"c, "\"c)
+                    If Not mapaBd.TryGetValue(claveRuta, infoBd) Then
+                        Dim rutaRel = ModuloConversionTiff.ObtenerRutaRelativa(origenBase, rutaPdf).Replace("/"c, "\"c)
+                        mapaBd.TryGetValue(rutaRel, infoBd)
                     End If
                 End If
             End If
@@ -687,8 +688,23 @@ Public Class FormReparacion
             If pagsEsperadas <= 0 AndAlso infoBd IsNot Nothing AndAlso infoBd.Paginas > 0 Then
                 pagsEsperadas = infoBd.Paginas
             End If
-            If pagsEsperadas <= 0 Then
-                pagsEsperadas = ModuloConversionTiff.ObtenerTotalPaginasPdf(rutaPdf)
+
+            ' Si la cantidad de imágenes en disco no coincide con lo que decía la BD/índice (o si pagsEsperadas es 0),
+            ' la fuente suprema de verdad NUNCA es la BD (que puede tener registros viejos, desfasados o colisiones),
+            ' sino el archivo PDF físico de origen verificado directamente.
+            If pagsEsperadas <= 0 OrElse archivosTiff.Length <> pagsEsperadas Then
+                Dim pagsPdf = ModuloConversionTiff.ObtenerTotalPaginasPdf(rutaPdf)
+
+                ' Si regex devolvió menos páginas que las imágenes que ya existen físicamente en destino,
+                ' consultar a MuPDF directamente (resuelve catálogos corruptos, sub-árboles y revisiones incrementales)
+                If pagsPdf > 0 AndAlso archivosTiff.Length > pagsPdf Then
+                    Dim pagsMu = ModuloConversionTiff.ObtenerPaginasPdfConMuPdf(rutaPdf)
+                    If pagsMu > pagsPdf Then pagsPdf = pagsMu
+                End If
+
+                If pagsPdf > 0 Then
+                    pagsEsperadas = pagsPdf
+                End If
             End If
             item.PagsEsperadas = pagsEsperadas
 
@@ -725,17 +741,42 @@ Public Class FormReparacion
             End If
 
             ' 6. Verificación de concordancia final
-            If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" Then
+            If infoBd IsNot Nothing AndAlso infoBd.Estatus = "OK" AndAlso infoBd.Paginas = pagsEsperadas Then
                 item.Estado = "✔️ Correcto (OK)"
                 item.Detalle = "Físico completo y registrado en BD con estatus OK."
                 item.EsIncompletoOFaltante = False
                 item.Seleccionado = False
             Else
-                item.Estado = "⚠️ Físico OK (Falta en BD)"
-                item.Detalle = "Imágenes TIFF completas en disco pero falta confirmar en BD."
-                item.EsIncompletoOFaltante = True
-                item.Seleccionado = True
-                EscribirLogReparador($"[ANALISIS_FALTA_EN_BD] PDF='{rutaPdf}' | Físico tiene {archivosTiff.Length} TIFFs pero falta en BD.")
+                ' El físico está 100% verificado y coincide con el PDF, pero falta en BD o tenía un número desfasado en BD
+                ' Sincronizar automáticamente en segundo plano para cuadrar la BD
+                Dim usuario = If(ModuloUsuarios.UsuarioActual IsNot Nothing, ModuloUsuarios.UsuarioActual.NombreUsuario, Environment.UserName)
+                Dim anioMatch = System.Text.RegularExpressions.Regex.Match(nombreSinExt, "\b(19\d{2}|20\d{2})\b")
+                Dim anioStr = If(anioMatch.Success, anioMatch.Value, "")
+                Dim delegacion = Path.GetFileName(Path.GetDirectoryName(carpetaDestinoEsperada))
+                Dim mDel = System.Text.RegularExpressions.Regex.Match(carpetaDestinoEsperada, "(ENTREGABLE\s*\d+|ENTREGA\s*\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                If mDel.Success Then
+                    delegacion = System.Text.RegularExpressions.Regex.Replace(mDel.Value, "^ENTREGA\s*", "ENTREGABLE ", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                End If
+
+                ModuloBitacoraAsync.EncolarTransferenciaTiff(
+                    ModuloConversionTiff.ObtenerRutaRelativa(origenBase, rutaPdf),
+                    item.CarpetaOrigen,
+                    carpetaDestinoEsperada,
+                    item.Documento,
+                    item.Documento,
+                    nombreSinExt,
+                    "", "OK",
+                    pagsEsperadas,
+                    delegacion,
+                    usuario,
+                    anioStr
+                )
+
+                item.Estado = "✔️ Correcto (OK)"
+                item.Detalle = $"Físico completo ({pagsEsperadas} imágenes verificadas) y sincronizado en BD."
+                item.EsIncompletoOFaltante = False
+                item.Seleccionado = False
+                EscribirLogReparador($"[ANALISIS_AUTO_SINCRONIZADO_OK] PDF='{rutaPdf}' | Páginas={pagsEsperadas} verificadas e informadas a BD.")
             End If
 
             Return item
